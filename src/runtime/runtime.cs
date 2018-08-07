@@ -350,9 +350,63 @@ namespace Python.Runtime
 
         internal static void Shutdown()
         {
+/*            string code = @"
+import sys,time
+sys.stderr.write('[%s][Runtime.Shutdown] before gc.collect 1\n'%time.strftime('%a, %d %b %Y %H:%M:%S', time.gmtime()))
+sys.stderr.flush()
+
+import gc
+gc.collect()
+";
+            PythonEngine.Exec(code);
+            */
             AssemblyManager.Shutdown();
+
+/*            code = @"
+import sys,time
+sys.stderr.write('[%s][Runtime.Shutdown] before gc.collect 2\n'%time.strftime('%a, %d %b %Y %H:%M:%S', time.gmtime()))
+sys.stderr.flush()
+
+
+import gc
+gc.collect()
+";
+            PythonEngine.Exec(code);
+            */
             Exceptions.Shutdown();
+/*
+            code = @"
+import sys,time
+sys.stderr.write('[%s][Runtime.Shutdown] before gc.collect 3\n'%time.strftime('%a, %d %b %Y %H:%M:%S', time.gmtime()))
+sys.stderr.flush()
+
+
+import gc
+gc.collect()
+";
+*/
             ImportHook.Shutdown();
+/*
+            code = @"
+import sys,time
+sys.stderr.write('[%s][Runtime.Shutdown] before gc.collect 4\n'%time.strftime('%a, %d %b %Y %H:%M:%S', time.gmtime()))
+sys.stderr.flush()
+
+
+import gc
+gc.collect()
+";
+            PythonEngine.Exec(code);
+
+
+            code = @"
+import sys,time
+sys.stderr.write('[%s][Runtime.Shutdown] Before Py_Finalize\n'%time.strftime('%a, %d %b %Y %H:%M:%S', time.gmtime()))
+sys.stderr.flush()
+
+";
+            PythonEngine.Exec(code);
+            */
             Py_Finalize();
         }
 
@@ -544,6 +598,9 @@ namespace Python.Runtime
             Py_DecRef(op);
             return;
 #else
+            /////////////////dltrace////////////////////////
+            CLRObjTracker.Log(op,"Runtime.XDecref");
+            /////////////////dltrace////////////////////////
             var p = (void*)op;
             if ((void*)0 != p)
             {
