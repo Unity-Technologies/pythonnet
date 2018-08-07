@@ -376,6 +376,15 @@ namespace Python.Runtime
             set { _SuppressOverloads = value; }
         }
 
+
+
+        [ModuleFunction]
+        [ForbidPythonThreads]
+        public static DummyClass DummyMethod()
+        {
+            return DummyClass.instance;
+        }
+
         [ModuleFunction]
         [ForbidPythonThreads]
         public static Assembly AddReference(string name)
@@ -408,8 +417,10 @@ namespace Python.Runtime
                 throw new FileNotFoundException($"Unable to find assembly '{name}'.");
             }
 
-            return assembly;
-        }
+            // This makes application crash on a second domain unload (in Py_Finalize)
+            //return assembly;
+            return null;
+  }
 
         /// <summary>
         /// Get a Type instance for a class object.

@@ -1,4 +1,4 @@
-﻿using System;
+using System;
 using System.Collections.Generic;
 using System.IO;
 using System.Linq;
@@ -155,6 +155,23 @@ namespace Python.Runtime
         /// </remarks>
         private static void OnDomainUnload(object sender, EventArgs e)
         {
+/*            string code = @"
+import sys,time
+sys.stderr.write('[%s][PythonEngine.OnDomainUnload] Before gc.collect\n'%time.strftime('%a, %d %b %Y %H:%M:%S', time.gmtime()))
+sys.stderr.flush()
+
+import gc
+gc.collect()
+";
+            PythonEngine.Exec(code);
+
+            code = @"
+import sys,time
+sys.stderr.write('[%s][PythonEngine.OnDomainUnload] Before Shutdown\n'%time.strftime('%a, %d %b %Y %H:%M:%S', time.gmtime()))
+sys.stderr.flush()
+";
+            PythonEngine.Exec(code);
+*/
             Shutdown();
         }
 
@@ -172,7 +189,7 @@ namespace Python.Runtime
             if (!initialized)
             {
                 // Make sure we shut down properly on app domain reload
-                System.AppDomain.CurrentDomain.DomainUnload += new EventHandler(OnDomainUnload);
+                System.AppDomain.CurrentDomain.DomainUnload += OnDomainUnload;
 
                 // Creating the delegateManager MUST happen before Runtime.Initialize
                 // is called. If it happens afterwards, DelegateManager's CodeGenerator

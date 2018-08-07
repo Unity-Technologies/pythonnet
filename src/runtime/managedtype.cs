@@ -20,6 +20,9 @@ namespace Python.Runtime
         /// </summary>
         internal static ManagedType GetManagedObject(IntPtr ob)
         {
+            /////////////////dltrace////////////////////////
+            CLRObjTracker.Log(ob,"ManagedType.GetManagedObject");
+            /////////////////dltrace////////////////////////
             if (ob != IntPtr.Zero)
             {
                 IntPtr tp = Runtime.PyObject_TYPE(ob);
@@ -48,6 +51,9 @@ namespace Python.Runtime
 
         internal static ManagedType GetManagedObjectErr(IntPtr ob)
         {
+            /////////////////dltrace////////////////////////
+            CLRObjTracker.Log(ob,"ManagedType.GetManagedObjectErr");
+            /////////////////dltrace////////////////////////
             ManagedType result = GetManagedObject(ob);
             if (result == null)
             {
@@ -59,6 +65,9 @@ namespace Python.Runtime
 
         internal static bool IsManagedType(IntPtr ob)
         {
+            /////////////////dltrace////////////////////////
+            CLRObjTracker.Log(ob,"ManagedType.IsManagedType");
+            /////////////////dltrace////////////////////////
             if (ob != IntPtr.Zero)
             {
                 IntPtr tp = Runtime.PyObject_TYPE(ob);
