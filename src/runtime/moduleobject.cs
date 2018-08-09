@@ -1,3 +1,4 @@
+using Python.Runtime;
 using System;
 using System.Collections.Generic;
 using System.IO;
@@ -418,8 +419,7 @@ namespace Python.Runtime
             }
 
             // This makes application crash on a second domain unload (in Py_Finalize)
-            //return assembly;
-            return null;
+            return assembly;
   }
 
         /// <summary>
