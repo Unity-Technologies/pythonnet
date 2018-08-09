@@ -355,22 +355,22 @@ namespace Python.Runtime
             ImportHook.Shutdown();
             Py_Finalize();
 
-            // Now unload the Python library from memory.
-            // We will start with a fresh interpreter next time around
+            // Now unload the Python library from memory and load it again, providing a
+            // fresh interpreter. This prevents a crash (exception) on second domain reload
             // https://stackoverflow.com/questions/2445536/unload-a-dll-loaded-using-dllimport
-/*            if (_PythonDll != "__Internal")
+            if (_PythonDll != "__Internal")
             {
                 IntPtr dllLocal = NativeMethods.LoadLibrary(_PythonDll);
 
-                // Twice: one for the call above, another for the actual first call to LoadLibrary
+                // Twice: a first one for the call to LoadLibrary above,
+                //        a second one for the original call to LoadLibrary (should result in unloading the Python library from memory)
                 NativeMethods.FreeLibrary(dllLocal);
                 NativeMethods.FreeLibrary(dllLocal);
 
                 // Here the Python library is supposed to be unloaded.
-                // Load it again
+                // Load it again in order to get a fresh interpreter
                 NativeMethods.LoadLibrary(_PythonDll);
             }
-  */
         }
 
         // called *without* the GIL acquired by clr._AtExit
