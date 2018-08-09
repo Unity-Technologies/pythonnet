@@ -7,7 +7,7 @@ How to repro:
 2. Compile using the same platform as Python.Runtime.dll (e.g. x64)
 3. Copy Python.Runtime.dll in the directory where hotReloadCrashRepro.exe is located (e.g. bin\x64\Debug)
 4. Run "hotReloadCrashRepro.exe full_path_to_theAssembly.cs
-    e.g. hotReloadCrashRepro.exe "D:\projects\pythonnet\hotReloadCrashRepro\hotReloadCrashRepro\theAssembly.cs"
+    e.g. hotReloadCrashRepro.exe "D:\projects\pythonnet\hotReloadCrashRepro\theAssembly.cs"
     
 The expected output is:    
 
