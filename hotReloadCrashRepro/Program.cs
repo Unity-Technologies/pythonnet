@@ -19,13 +19,14 @@ namespace hotReloadCrashRepro
         static void Main(string[] args)
         {
             // Defaults is missing args
-            string pathToTheAssembly = @"D:\projects\pythonnet\hotReloadCrashRepro\hotReloadCrashRepro\theAssembly.cs";
+            string pathToTheAssembly = @"D:\projects\pythonnet\hotReloadCrashRepro\theAssembly.cs";
             if (args.Length > 0)
             {
                 pathToTheAssembly = args[0];
             }
 
             // The exception is thrown on the second call to Py_Finalize
+            Assembly theCompiledAssembly = null;
             for(int i = 0; i < 2; ++i) {
                 // Create the domain
                 System.Console.WriteLine(string.Format("[Program.Main] ===Pass #{0}===",i));
@@ -38,7 +39,7 @@ namespace hotReloadCrashRepro
                     System.Console.WriteLine("[Program.Main] Building the assembly");
 
                     // The assembly is compiled as a dll in the same directory as the Program executable
-                    var theCompiledAssembly = BuildAssembly(pathToTheAssembly, "TheCompiledAssembly.dll");
+                    theCompiledAssembly = BuildAssembly(pathToTheAssembly, "TheCompiledAssembly.dll");
                 }
               
                 // Create a Proxy object in the new domain, where we want the
@@ -49,7 +50,7 @@ namespace hotReloadCrashRepro
                     type.FullName);
 
                 // From now on use the Proxy to call into the new assembly
-                theProxy.InitAssembly(string.Format(@"D:\projects\pythonnet\hotReloadCrashRepro\hotReloadCrashRepro\bin\x64\Debug\TheCompiledAssembly.dll",i));
+                theProxy.InitAssembly(theCompiledAssembly.Location);
                 theProxy.RunPython();
 
                 System.Console.WriteLine("[Program.Main] Before Domain Unload");
