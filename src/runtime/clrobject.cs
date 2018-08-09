@@ -1,51 +1,8 @@
 using System;
 using System.Runtime.InteropServices;
-using System.IO;
 
 namespace Python.Runtime
 {
-
-
-    public class DummyClass
-    {
-        static public DummyClass instance = new DummyClass();
-    }
-
-    public class CLRObjTracker
-    {
-        // The tracked type
-        static public IntPtr trackedPyHandle;
-        static public IntPtr trackedTPHandle;
-
-        // Will log if the given CLRObject is of the tracked type
-        static internal void Log(CLRObject clrObj, string trace)
-        {
-            if (clrObj.tpHandle == trackedTPHandle)
-            {
-                Log(string.Format("[tpHandle = {0}]: {1}", clrObj.tpHandle, trace));
-            }
-        }
-
-        // Will log if the given pyhandle is the tracked one
-        static internal unsafe void Log(IntPtr pyHandle, string trace)
-        {
-            if (pyHandle == trackedPyHandle)
-            {
-                Log(string.Format("[pyHandle = {0}, refCnt = {1}]: {2}", pyHandle, Runtime.Refcount(pyHandle), trace));
-            }
-        }
-
-        // Logs to the file, no condition
-        static internal void Log(string trace)
-        {
-            using (StreamWriter sw = File.AppendText(@"d:\temp\CLRLog.txt"))
-            {
-                sw.WriteLine(string.Format("[{0}]{1}", System.DateTime.Now, trace));
-            }
-        }
-
-            
-    }
     internal class CLRObject : ManagedType
     {
         internal object inst;
@@ -75,10 +32,6 @@ namespace Python.Runtime
             // Fix the BaseException args (and __cause__ in case of Python 3)
             // slot if wrapping a CLR exception
             Exceptions.SetArgsAndCause(py);
-
-            /////////////////dltrace////////////////////////
-            CLRObjTracker.Log(this, "In CLRObject::CLRObject");
-            /////////////////dltrace////////////////////////
         }
 
 
@@ -101,27 +54,11 @@ namespace Python.Runtime
             return co.pyHandle;
         }
 
+
         internal static IntPtr GetInstHandle(object ob, Type type)
         {
             ClassBase cc = ClassManager.GetClass(type);
-
-            /////////////////dltrace////////////////////////
-            if (type == typeof(DummyClass))
-            {
-                CLRObjTracker.trackedTPHandle = cc.tpHandle;
-            }
-            /////////////////dltrace////////////////////////
-
             CLRObject co = GetInstance(ob, cc.tpHandle);
-
-            /////////////////dltrace////////////////////////
-            if (type == typeof(DummyClass))
-            {
-                CLRObjTracker.trackedPyHandle = co.pyHandle;
-                CLRObjTracker.Log(co.pyHandle, "In CLRObject.GetInstHandle (start tracking pyHandle)");
-            }
-            /////////////////dltrace////////////////////////
-
             return co.pyHandle;
         }
 

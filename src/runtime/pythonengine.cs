@@ -155,23 +155,6 @@ namespace Python.Runtime
         /// </remarks>
         private static void OnDomainUnload(object sender, EventArgs e)
         {
-/*            string code = @"
-import sys,time
-sys.stderr.write('[%s][PythonEngine.OnDomainUnload] Before gc.collect\n'%time.strftime('%a, %d %b %Y %H:%M:%S', time.gmtime()))
-sys.stderr.flush()
-
-import gc
-gc.collect()
-";
-            PythonEngine.Exec(code);
-
-            code = @"
-import sys,time
-sys.stderr.write('[%s][PythonEngine.OnDomainUnload] Before Shutdown\n'%time.strftime('%a, %d %b %Y %H:%M:%S', time.gmtime()))
-sys.stderr.flush()
-";
-            PythonEngine.Exec(code);
-*/
             Shutdown();
         }
 
@@ -327,9 +310,6 @@ sys.stderr.flush()
         {
             if (initialized)
             {
-                // Make sure we shut down properly on app domain reload
-                System.AppDomain.CurrentDomain.DomainUnload -= OnDomainUnload;
-
                 PyScopeManager.Global.Clear();
                 Marshal.FreeHGlobal(_pythonHome);
                 _pythonHome = IntPtr.Zero;

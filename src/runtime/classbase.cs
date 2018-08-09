@@ -270,12 +270,7 @@ namespace Python.Runtime
         /// </summary>
         public static void tp_dealloc(IntPtr ob)
         {
-            /////////////////dltrace////////////////////////
-            CLRObjTracker.Log(ob, "ClassBase::tp_dealloc");
-            /////////////////dltrace////////////////////////
             ManagedType self = GetManagedObject(ob);
-
-
             IntPtr dict = Marshal.ReadIntPtr(ob, ObjectOffset.DictOffset(ob));
             if (dict != IntPtr.Zero)
             {
@@ -283,11 +278,6 @@ namespace Python.Runtime
             }
             Runtime.PyObject_GC_UnTrack(self.pyHandle);
             Runtime.PyObject_GC_Del(self.pyHandle);
-
-            /////////////////dltrace////////////////////////
-            CLRObjTracker.Log(ob, string.Format("ClassBase::tp_dealloc (cont'd): tpHandle refCnt before XDecref = {0}",Runtime.Refcount(self.tpHandle)));
-            /////////////////dltrace////////////////////////
-
             Runtime.XDecref(self.tpHandle);
             self.gcHandle.Free();
         }
