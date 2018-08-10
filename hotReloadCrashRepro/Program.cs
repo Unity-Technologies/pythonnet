@@ -18,14 +18,32 @@ namespace hotReloadCrashRepro
         /// <param name="args"></param>
         static void Main(string[] args)
         {
-            // Defaults is missing args
-            string pathToTheAssembly = @"D:\projects\pythonnet\hotReloadCrashRepro\theAssembly.cs";
+            string pathToTheAssembly = "";
+            try
+            {
+                // Defaults if args are not specified (standard location when
+                // building with Visual Studio 2017, using the x64 configuration)
+                pathToTheAssembly = System.IO.Path.Combine(AppDomain.CurrentDomain.BaseDirectory,
+                                                           @"..\..\..\theAssembly.cs");
+            }
+            catch (Exception)
+            {
+            }
+
             if (args.Length > 0)
             {
                 pathToTheAssembly = args[0];
             }
 
             // The exception is thrown on the second call to Py_Finalize
+            //
+            // First time through, on the Python side we litter some objects
+            // that Python figures someone still has a reference to, so it
+            // keeps them around -- leak!
+            //
+            // Second time through, Python gc looks at the leaked objects and calls
+            // tp_traverse on them. But the tp_traverse handler is C# code that got
+            // destroyed in the domain unload -- crash!)
             Assembly theCompiledAssembly = null;
             for(int i = 0; i < 2; ++i) {
                 // Create the domain
