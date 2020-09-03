@@ -97,11 +97,8 @@ namespace Python.Runtime
 
         // In Unity, the library is always loaded in-memory
         internal const string _PythonDll = "__Internal";
-#if MONO_LINUX
-        internal const string dllDirectory = "Library/conda/lib/";
-        internal const string pythonlib = "python3.7m";
-#elif MONO_MAC
-        internal const string dllDirectory = "/Library/PythonInstall/lib/";
+#if MONO_LINUX || MONO_MAC
+        internal const string dllDirectory = "Library/PythonInstall/lib/";
         internal const string pythonlib = "python3.7m";
 #else //windows
         internal const string dllDirectory = "Library/PythonInstall/";
@@ -318,9 +315,16 @@ namespace Python.Runtime
             InitializePlatformData();
 
             IntPtr dllLocal = IntPtr.Zero;
-            var loader = LibraryLoader.Get(OperatingSystem);
 
-            if (!(OperatingSystem == OperatingSystemType.Windows))
+#if MONO_OSX
+                var os = Python.Runtime.Platform.OperatingSystemType.Darwin;
+#elif MONO_LINUX
+                var os = Python.Runtime.Platform.OperatingSystemType.Linux;
+#else
+                var os = Python.Runtime.Platform.OperatingSystemType.Windows;
+#endif
+            var loader = LibraryLoader.Get(os);
+            if (!(os == OperatingSystemType.Windows))
             {
             if (_PythonDll != "__Internal")
             {
@@ -338,6 +342,24 @@ namespace Python.Runtime
             {
                 loader.Free(dllLocal);
             }
+
+#if MONO_LINUX
+            string[] dyLibPaths = System.IO.Directory.GetFiles(dllDirectory, "*.so");
+            foreach (string dyLibPath in dyLibPaths)
+            {
+                string dyLibName = System.IO.Path.GetFileNameWithoutExtension(dyLibPath);
+                if (! dyLibName.Contains("python"))
+                {
+                    // remove the first three characters, "lib"
+                    dyLibName = dyLibName.Remove(0, 3);
+                    dllLocal = loader.Load(dyLibName, dllDirectory);
+                    if (dllLocal == IntPtr.Zero)
+                    {
+                        Console.WriteLine($"Could not load {dyLibName}");
+                    }        
+                }
+            }
+#endif
 
             // Initialize modules that depend on the runtime class.
             AssemblyManager.Initialize();
@@ -371,6 +393,12 @@ namespace Python.Runtime
             IntPtr platformModule = PyImport_ImportModule("platform");
             IntPtr emptyTuple = PyTuple_New(0);
 
+            fn = PyObject_GetAttrString(platformModule, "system");
+            op = PyObject_Call(fn, emptyTuple, IntPtr.Zero);
+            string operatingSystemName = GetManagedString(op);
+            XDecref(op);
+            XDecref(fn);
+
             fn = PyObject_GetAttrString(platformModule, "machine");
             op = PyObject_Call(fn, emptyTuple, IntPtr.Zero);
             string machineName = GetManagedString(op);
@@ -382,6 +410,12 @@ namespace Python.Runtime
 
             // Now convert the strings into enum values so we can do switch
             // statements rather than constant parsing.
+            OperatingSystemType OSType;
+            if (!OperatingSystemTypeMapping.TryGetValue(operatingSystemName, out OSType))
+            {
+                OSType = OperatingSystemType.Other;
+            }
+            OperatingSystem = OSType;
 
             MachineType MType;
             if (!MachineTypeMapping.TryGetValue(machineName.ToLower(), out MType))
