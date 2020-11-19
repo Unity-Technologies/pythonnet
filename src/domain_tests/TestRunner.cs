@@ -4,52 +4,748 @@ using System;
 using Microsoft.CSharp;
 using System.CodeDom.Compiler;
 using System.IO;
+using System.Linq;
 
 namespace Python.DomainReloadTests
 {
     /// <summary>
+    /// This class provides an executable that can run domain reload tests.
+    /// The setup is a bit complicated:
+    /// 1. pytest runs test_*.py in this directory.
+    /// 2. test_classname runs Python.DomainReloadTests.exe (this class) with an argument
+    /// 3. This class at runtime creates a directory that has both C# and
+    ///    python code, and compiles the C#.
+    /// 4. This class then runs the C# code.
+    ///
+    /// But wait there's more indirection. The C# code that's run -- known as
+    /// the test runner --
     /// This class compiles a DLL that contains the class which code will change
     /// and a runner executable that will run Python code referencing the class.
-    /// It's Main() will:
-    /// * Run the runner and unlod it's domain
-    /// * Modify and re-compile the test class
-    /// * Re-run the runner and unload it twice
+    /// Each test case:
+    /// * Compiles some code, loads it into a domain, runs python that refers to it.
+    /// * Unload the domain.
+    /// * Compile a new piece of code, load it into a domain, run a new piece of python that accesses the code.
+    /// * Unload the domain. Reload the domain, run the same python again.
+    /// This class gets built into an executable which takes one argument:
+    /// which test case to run. That's because pytest assumes we'll run
+    /// everything in one process, but we really want a clean process on each
+    /// test case to test the init/reload/teardown parts of the domain reload
+    /// code.
     /// </summary>
     class TestRunner
     {
-        /// <summary>
-        /// The code of the test class that changes
-        /// </summary>
-        const string ChangingClassTemplate = @"
-using System;
+        const string TestAssemblyName = "DomainTests";
 
-namespace TestNamespace
-{
-    [Serializable]
-    public class {class}
-    {
-    }
-}";
+        class TestCase
+        {
+            /// <summary>
+            /// The key to pass as an argument to choose this test.
+            /// </summary>
+            public string Name;
 
-        /// <summary>
-        /// The Python code that accesses the test class
-        /// </summary>
-        const string PythonCode = @"import clr
-clr.AddReference('TestClass')
+            /// <summary>
+            /// The C# code to run in the first domain.
+            /// </summary>
+            public string DotNetBefore;
+
+            /// <summary>
+            /// The C# code to run in the second domain.
+            /// </summary>
+            public string DotNetAfter;
+
+            /// <summary>
+            /// The Python code to run as a module that imports the C#.
+            /// It should have two functions: before() and after(). Before
+            /// will be called when DotNetBefore is loaded; after will be
+            /// called (twice) when DotNetAfter is loaded.
+            /// To make the test fail, have those functions raise exceptions.
+            ///
+            /// Make sure there's no leading spaces since Python cares.
+            /// </summary>
+            public string PythonCode;
+        }
+
+        static TestCase[] Cases = new TestCase[]
+        {
+            new TestCase
+            {
+                Name = "class_rename",
+                DotNetBefore = @"
+                    namespace TestNamespace
+                    {
+                        [System.Serializable]
+                        public class Before { }
+                    }",
+                DotNetAfter = @"
+                    namespace TestNamespace
+                    {
+                        [System.Serializable]
+                        public class After { }
+                    }",
+                PythonCode = @"
+import clr
 import sys
-from TestNamespace import {class}
+clr.AddReference('DomainTests')
 import TestNamespace
-foo = None
-def do_work():
-    sys.my_obj = {class}
 
-def test_work():
-    print({class})
-    print(sys.my_obj)
-";
+def before_reload():
+    sys.my_cls = TestNamespace.Before
+
+def after_reload():
+    bar = sys.my_cls()
+    print(bar)
+    
+    try:
+        foo = TestNamespace.Before
+    except AttributeError:
+        print('Caught expected exception')
+    else:
+        raise AssertionError('Failed to throw exception')
+                    ",
+            },
+
+            new TestCase 
+            {
+                Name = "static_member_rename",
+                DotNetBefore = @"
+                    namespace TestNamespace
+                    {
+                        [System.Serializable]
+                        public class Cls { public static int Before() { return 5; } }
+                    }",
+                DotNetAfter = @"
+                    namespace TestNamespace
+                    {
+                        [System.Serializable]
+                        public class Cls { public static int After() { return 10; } }
+                    }",
+                PythonCode = @"
+import clr
+import sys
+clr.AddReference('DomainTests')
+import TestNamespace
+
+def before_reload():
+    sys.my_cls = TestNamespace.Cls
+    sys.my_fn = TestNamespace.Cls.Before
+    sys.my_fn()
+    TestNamespace.Cls.Before()
+
+def after_reload():
+
+    # We should have reloaded the class so we can access the new function.
+    assert 10 == sys.my_cls.After()
+    assert True is True
+
+    try:
+        # We should have reloaded the class. The old function still exists, but is now invalid.
+        sys.my_cls.Before()
+    except AttributeError:
+        print('Caught expected TypeError')
+    else:
+        raise AssertionError('Failed to throw exception: expected TypeError calling class member that no longer exists')
+
+    assert sys.my_fn is not None
+
+    try:
+        # Unbound functions still exist. They will error out when called though.
+        sys.my_fn()
+    except TypeError:
+        print('Caught expected TypeError')
+    else:
+        raise AssertionError('Failed to throw exception: expected TypeError calling unbound .NET function that no longer exists')
+                    ",
+            },
+
+
+            new TestCase 
+            {
+                Name = "member_rename",
+                DotNetBefore = @"
+                    namespace TestNamespace
+                    {
+                        [System.Serializable]
+                        public class Cls { public int Before() { return 5; } }
+                    }",
+                DotNetAfter = @"
+                    namespace TestNamespace
+                    {
+                        [System.Serializable]
+                        public class Cls { public int After() { return 10; } }
+                    }",
+                PythonCode = @"
+import clr
+import sys
+clr.AddReference('DomainTests')
+import TestNamespace
+
+def before_reload():
+    sys.my_cls = TestNamespace.Cls()
+    sys.my_fn = TestNamespace.Cls().Before
+    sys.my_fn()
+    TestNamespace.Cls().Before()
+
+def after_reload():
+
+    # We should have reloaded the class so we can access the new function.
+    assert 10 == sys.my_cls.After()
+    assert True is True
+
+    try:
+        # We should have reloaded the class. The old function still exists, but is now invalid.
+        sys.my_cls.Before()
+    except AttributeError:
+        print('Caught expected TypeError')
+    else:
+        raise AssertionError('Failed to throw exception: expected TypeError calling class member that no longer exists')
+    
+    assert sys.my_fn is not None
+
+    try:
+        # Unbound functions still exist. They will error out when called though.
+        sys.my_fn()
+    except TypeError:
+        print('Caught expected TypeError')
+    else:
+        raise AssertionError('Failed to throw exception: expected TypeError calling unbound .NET function that no longer exists')
+                    ",
+            },
+
+            new TestCase
+            {
+                Name = "field_rename",
+                DotNetBefore = @"
+                    namespace TestNamespace
+                    {
+                        [System.Serializable]
+                        public class Cls 
+                        {
+                            static public int Before = 2;
+                        }
+                    }",
+                DotNetAfter = @"
+                    namespace TestNamespace
+                    {
+                        [System.Serializable]
+                        public class Cls
+                        {
+                            static public int After = 4;
+                        }
+                    }",
+                PythonCode = @"
+import clr
+import sys
+clr.AddReference('DomainTests')
+from TestNamespace import Cls
+
+def before_reload():
+    sys.my_int = Cls.Before
+
+def after_reload():
+    print(sys.my_int)
+    try:
+        assert 2 == Cls.Before
+    except AttributeError:
+        print('Caught expected exception')
+    else:
+        raise AssertionError('Failed to throw exception')
+",
+            },
+            new TestCase
+            {
+                Name = "property_rename",
+                DotNetBefore = @"
+                    namespace TestNamespace
+                    {
+                        [System.Serializable]
+                        public class Cls 
+                        {
+                            static public int Before { get { return 2; } }
+                        }
+                    }",
+                DotNetAfter = @"
+                    namespace TestNamespace
+                    {
+                        [System.Serializable]
+                        public class Cls
+                        {
+                            static public int After { get { return 4; } }
+                        }
+                    }",
+                PythonCode = @"
+import clr
+import sys
+clr.AddReference('DomainTests')
+from TestNamespace import Cls
+
+def before_reload():
+    sys.my_int = Cls.Before
+
+def after_reload():
+    print(sys.my_int)
+    try:
+        assert 2 == Cls.Before
+    except AttributeError:
+        print('Caught expected exception')
+    else:
+        raise AssertionError('Failed to throw exception')
+",
+            },
+
+            new TestCase
+            {
+                Name = "event_rename",
+                DotNetBefore = @"
+                    using System;
+                    namespace TestNamespace
+                    {
+                        [System.Serializable]
+                        public class Cls 
+                        {
+                            public static event Action Before;
+                            public static void Call()
+                            {
+                                Before();
+                            }
+                        }
+                    }",
+                DotNetAfter = @"
+                    namespace TestNamespace
+                    {
+                        [System.Serializable]
+                        public class Cls
+                        {
+                            public static event Action After;
+                            public static void Call()
+                            {
+                                After();
+                            }
+                        }
+                    }",
+                PythonCode = @"
+import clr
+import sys
+clr.AddReference('DomainTests')
+from TestNamespace import Cls
+
+called = False
+
+def callback_function():
+    global called
+    called = True
+
+def before_reload():
+    global called
+    called = False
+    Cls.Before += callback_function
+    Cls.Call()
+    assert called is True
+
+def after_reload():
+    global called
+    assert called is True
+    called = False
+    Cls.Call()
+    assert called is False
+    #try:
+    #    assert 2 == Cls.Before
+    #except TypeError:
+    #    print('Caught expected exception')
+    #else:
+    #    raise AssertionError('Failed to throw exception')
+",
+            },
+
+            new TestCase
+            {
+                Name = "namespace_rename",
+                DotNetBefore = @"
+                    namespace TestNamespace
+                    {
+                        [System.Serializable]
+                        public class Cls 
+                        {
+                            public int Foo;
+                            public Cls(int i)
+                            {
+                                Foo = i;
+                            }
+                        }
+                    }",
+                DotNetAfter = @"
+                    namespace NewTestNamespace
+                    {
+                        [System.Serializable]
+                        public class Cls 
+                        {
+                            public int Foo;
+                            public Cls(int i)
+                            {
+                                Foo = i;
+                            }
+                        }
+                    }",
+                PythonCode = @"
+import clr
+import sys
+clr.AddReference('DomainTests')
+import TestNamespace
+
+def before_reload():
+    sys.my_cls = TestNamespace.Cls
+    sys.my_inst = TestNamespace.Cls(1)
+
+def after_reload():
+     try:
+        TestNamespace.Cls(2)
+         sys.my_cls.Member()
+     except AttributeError:
+         print('Caught expected exception')
+     else:
+         raise AssertionError('Failed to throw exception')
+                    ",
+            },
+
+            new TestCase
+            {
+                Name = "field_visibility_change",
+                DotNetBefore = @"
+                    namespace TestNamespace
+                    {
+                        [System.Serializable]
+                        public class Cls
+                        {
+                            public static int Foo = 1;
+                            public static int Field = 2;
+                        }
+                    }",
+                DotNetAfter = @"
+                    namespace TestNamespace
+                    {
+                        [System.Serializable]
+                        public class Cls
+                        {
+                            public static int Foo = 1;
+                            private static int Field = 2;
+                        }
+                    }",
+                PythonCode = @"
+import clr
+import sys
+clr.AddReference('DomainTests')
+from TestNamespace import Cls
+
+def before_reload():
+    assert 2 == Cls.Field
+    assert 1 == Cls.Foo
+
+def after_reload():
+    assert 1 == Cls.Foo
+    try:
+        assert 1 == Cls.Field
+    except AttributeError:
+        print('Caught expected exception')
+    else:
+        raise AssertionError('Failed to throw exception')
+                    ",
+            },
+
+            new TestCase
+            {
+                Name = "method_visibility_change",
+                DotNetBefore = @"
+                    namespace TestNamespace
+                    {
+                        [System.Serializable]
+                        public class Cls
+                        {
+                            public static int Foo() { return 1; }
+                            public static int Function() { return 2; }
+                        }
+                    }",
+                DotNetAfter = @"
+                    namespace TestNamespace
+                    {
+                        [System.Serializable]
+                        public class Cls
+                        {
+                            public static int Foo() { return 1; }
+                            private static int Function() { return 2; }
+                        }
+                    }",
+                PythonCode = @"
+import clr
+import sys
+clr.AddReference('DomainTests')
+from TestNamespace import Cls
+
+def before_reload():
+    sys.my_func = Cls.Function
+    assert 1 == Cls.Foo()
+    assert 2 == Cls.Function()
+
+def after_reload():
+    assert 1 == Cls.Foo()
+    try:
+        assert 2 == Cls.Function()
+    except AttributeError:
+        print('Caught expected exception')
+    else:
+        raise AssertionError('Failed to throw exception')
+
+    try:
+        assert 2 == sys.my_func()
+    except TypeError:
+        print('Caught expected exception')
+    else:
+        raise AssertionError('Failed to throw exception')
+                    ",
+            },
+
+            new TestCase
+            {
+                Name = "property_visibility_change",
+                DotNetBefore = @"
+                    namespace TestNamespace
+                    {
+                        [System.Serializable]
+                        public class Cls
+                        {
+                            public static int Foo { get { return 1; } }
+                            public static int Property { get { return 2; } }
+                        }
+                    }",
+                DotNetAfter = @"
+                    namespace TestNamespace
+                    {
+                        [System.Serializable]
+                        public class Cls
+                        {
+                            public static int Foo { get { return 1; } }
+                            private static int Property { get { return 2; } }
+                        }
+                    }",
+                PythonCode = @"
+import clr
+import sys
+clr.AddReference('DomainTests')
+from TestNamespace import Cls
+
+def before_reload():
+    assert 1 == Cls.Foo
+    assert 2 == Cls.Property
+
+def after_reload():
+    assert 1 == Cls.Foo
+    try:
+        assert 2 == Cls.Property
+    except AttributeError:
+        print('Caught expected exception')
+    else:
+        raise AssertionError('Failed to throw exception')
+                    ",
+            },
+
+        new TestCase
+            {
+                Name = "class_visibility_change",
+                DotNetBefore = @"
+                    namespace TestNamespace
+                    {
+                        [System.Serializable]
+                        internal class NaturallyInternal { }
+                        
+                        [System.Serializable]
+                        public class Cls { }
+                    }",
+                DotNetAfter = @"
+                    namespace TestNamespace
+                    {
+                        [System.Serializable]
+                        internal class Cls { }
+                    }",
+                PythonCode = @"
+import clr
+import sys
+clr.AddReference('DomainTests')
+from TestNamespace import Cls
+
+def before_reload():
+    sys.my_cls = Cls
+    sys._bob = NaturallyInternal()
+
+def after_reload():
+    sys.my_cls()
+    Cls()
+    try:
+        Cls()
+    except AttributeError:
+        print('Caught expected exception')
+    else:
+        raise AssertionError('Failed to throw exception')
+                    ",
+            },
+
+            new TestCase
+            {
+                Name = "method_parameters_change",
+                DotNetBefore = @"
+                    namespace TestNamespace
+                    {
+                        [System.Serializable]
+                        public class Cls
+                        {
+                            public static void MyFunction(int a)
+                            {
+                                System.Console.WriteLine(string.Format(""MyFunction says: {0}"", a));
+                            }
+                        }
+                    }",
+                DotNetAfter = @"
+                    namespace TestNamespace
+                    {
+                        [System.Serializable]
+                        public class Cls
+                        {
+                            public static void MyFunction(string a)
+                            {
+                                System.Console.WriteLine(string.Format(""MyFunction says: {0}"", a));
+                            }
+                        }
+                    }",
+                PythonCode = @"
+import clr
+import sys
+clr.AddReference('DomainTests')
+from TestNamespace import Cls
+
+def before_reload():
+    sys.my_cls = Cls
+    sys.my_func = Cls.MyFunction
+    sys.my_cls.MyFunction(1)
+    sys.my_func(2)
+
+def after_reload():
+    try:
+        sys.my_cls.MyFunction(1)
+    except TypeError:
+        print('Caught expected exception')
+    else:
+        raise AssertionError('Failed to throw exception')
+
+    try:
+        sys.my_func(2)
+    except TypeError:
+        print('Caught expected exception')
+    else:
+        raise AssertionError('Failed to throw exception')
+
+    # Calling the function from the class passes
+    sys.my_cls.MyFunction('test')
+    
+    try:
+        # calling the callable directly fails
+        sys.my_func('test')
+    except TypeError:
+        print('Caught expected exception')
+    else:
+        raise AssertionError('Failed to throw exception')
+    
+    Cls.MyFunction('another test')
+    
+                    ",
+            },
+
+            new TestCase
+            {
+                Name = "method_return_type_change",
+                DotNetBefore = @"
+                    namespace TestNamespace
+                    {
+                        [System.Serializable]
+                        public class Cls
+                        {
+                            public static int MyFunction()
+                            {
+                                return 2;
+                            }
+                        }
+                    }",
+                DotNetAfter = @"
+                    namespace TestNamespace
+                    {
+                        [System.Serializable]
+                        public class Cls
+                        {
+                            public static string MyFunction()
+                            {
+                                return ""22"";
+                            }
+                        }
+                    }",
+                PythonCode = @"
+import clr
+import sys
+clr.AddReference('DomainTests')
+from TestNamespace import Cls
+
+def before_reload():
+    sys.my_cls = Cls
+    sys.my_func = Cls.MyFunction
+    assert 2 == sys.my_cls.MyFunction()
+    assert 2 == sys.my_func()
+
+def after_reload():
+    assert '22' == sys.my_cls.MyFunction()
+    assert '22' == sys.my_func()
+    assert '22' == Cls.MyFunction()
+                    ",
+            },
+
+            new TestCase
+            {
+                Name = "field_type_change",
+                DotNetBefore = @"
+                    namespace TestNamespace
+                    {
+                        [System.Serializable]
+                        public class Cls 
+                        {
+                            static public int Field = 2;
+                        }
+                    }",
+                DotNetAfter = @"
+                    namespace TestNamespace
+                    {
+                        [System.Serializable]
+                        public class Cls
+                        {
+                            static public string Field = ""22"";
+                        }
+                    }",
+                PythonCode = @"
+import clr
+import sys
+clr.AddReference('DomainTests')
+from TestNamespace import Cls
+
+def before_reload():
+    sys.my_cls = Cls
+    assert 2 == sys.my_cls.Field
+
+def after_reload():
+    assert '22' == Cls.Field
+    assert '22' == sys.my_cls.Field
+                    ",
+            },
+
+        };
 
         /// <summary>
         /// The runner's code. Runs the python code
+        /// This is a template for string.Format
+        /// Arg 0 is the reload mode: ShutdownMode.Reload or other.
+        /// Arg 1 is the no-arg python function to run, before or after.
         /// </summary>
         const string CaseRunnerTemplate = @"
 using System;
@@ -71,13 +767,18 @@ namespace CaseRunner
                     dynamic sys = Py.Import(""sys"");
                     sys.path.append(new PyString(temp));
                     dynamic test_mod = Py.Import(""domain_test_module.mod"");
-                    test_mod.{1}_work();
+                    test_mod.{1}_reload();
                 }}
                 PythonEngine.Shutdown();
             }}
             catch (PythonException pe)
             {{
                 throw new ArgumentException(message:pe.Message+""    ""+pe.StackTrace);
+            }}
+            catch (Exception e)
+            {{
+                Console.WriteLine(e.StackTrace);
+                throw;
             }}
             return 0;
         }}
@@ -88,12 +789,18 @@ namespace CaseRunner
 
         public static int Main(string[] args)
         {
+            TestCase testCase;
             if (args.Length < 1)
             {
-                args = new string[] {"TestClass", "NewTestClass"};
-                // return 123;
+                testCase = Cases[0];
             }
-            Console.WriteLine($"Testing with arguments: {string.Join(", ", args)}");
+            else
+            {
+                string testName = args[0];
+                Console.WriteLine($"-- Looking for domain reload test case {testName}");
+                testCase = Cases.First(c => c.Name == testName);
+            }
+            Console.WriteLine($"-- Running domain reload test case: {testCase.Name}");
 
             var tempFolderPython = Path.Combine(Path.GetTempPath(), "Python.Runtime.dll");
             if (File.Exists(tempFolderPython))
@@ -103,27 +810,31 @@ namespace CaseRunner
 
             File.Copy(PythonDllLocation, tempFolderPython);
             
-            CreatePythonModule(args[0]);
+            CreatePythonModule(testCase);
             {
-                var runnerAssembly = CreateCaseRunnerAssembly(verb:"do");
-                CreateTestClassAssembly(className: args[0]);
-
-                var runnerDomain = CreateDomain("case runner");
-                RunAndUnload(runnerDomain, runnerAssembly);
-            }
-
-            {
-                var runnerAssembly = CreateCaseRunnerAssembly(verb:"test");
-                // remove the method
-                CreateTestClassAssembly(className: args[1]);
-
-                // Do it twice for good measure
+                var runnerAssembly = CreateCaseRunnerAssembly(verb:"before");
+                CreateTestClassAssembly(testCase.DotNetBefore);
                 {
-                    var runnerDomain = CreateDomain("case runner 2");
+                    var runnerDomain = CreateDomain("case runner before");
                     RunAndUnload(runnerDomain, runnerAssembly);
                 }
                 {
-                    var runnerDomain = CreateDomain("case runner 3");
+                    var runnerDomain = CreateDomain("case runner before (again)");
+                    RunAndUnload(runnerDomain, runnerAssembly);
+                }
+            }
+
+            {
+                var runnerAssembly = CreateCaseRunnerAssembly(verb:"after");
+                CreateTestClassAssembly(testCase.DotNetAfter);
+
+                // Do it twice for good measure
+                {
+                    var runnerDomain = CreateDomain("case runner after");
+                    RunAndUnload(runnerDomain, runnerAssembly);
+                }
+                {
+                    var runnerDomain = CreateDomain("case runner after (again)");
                     RunAndUnload(runnerDomain, runnerAssembly);
                 }
             }
@@ -135,7 +846,7 @@ namespace CaseRunner
         {
             // Somehow the stack traces during execution sometimes have the wrong line numbers.
             // Add some info for when debugging is required.
-            Console.WriteLine($"Runining domain {domain.FriendlyName}");
+            Console.WriteLine($"-- Running domain {domain.FriendlyName}");
             domain.ExecuteAssembly(assemblyPath);
             AppDomain.Unload(domain);
             GC.Collect();
@@ -143,15 +854,12 @@ namespace CaseRunner
             GC.Collect();
         }
 
-        static string CreateTestClassAssembly(string className)
+        static string CreateTestClassAssembly(string code)
         {
-            var name = "TestClass.dll";
-            string code = ChangingClassTemplate.Replace("{class}", className);
-
-            return CreateAssembly(name, code, exe: false);
+            return CreateAssembly(TestAssemblyName + ".dll", code, exe: false);
         }
 
-        static string CreateCaseRunnerAssembly(string shutdownMode = "ShutdownMode.Reload", string verb = "do")
+        static string CreateCaseRunnerAssembly(string verb, string shutdownMode = "ShutdownMode.Reload")
         {
             var code = string.Format(CaseRunnerTemplate, shutdownMode, verb);
             var name = "TestCaseRunner.exe";
@@ -179,11 +887,13 @@ namespace CaseRunner
             CompilerResults results = provider.CompileAssemblyFromSource(parameters, code);
             if (results.NativeCompilerReturnValue != 0)
             {
+                var stderr = System.Console.Error;
+                stderr.WriteLine($"Error in {name} compiling:\n{code}");
                 foreach (var error in results.Errors)
                 {
-                    System.Console.WriteLine(error);
+                    stderr.WriteLine(error);
                 }
-                throw new ArgumentException();
+                throw new ArgumentException("Error compiling code");
             }
 
             return assemblyFullPath;
@@ -210,7 +920,7 @@ namespace CaseRunner
             return domain;
         }
 
-        static string CreatePythonModule(string className)
+        static string CreatePythonModule(TestCase testCase)
         {
             var modulePath = Path.Combine(Path.GetTempPath(), "domain_test_module");
             if (Directory.Exists(modulePath))
@@ -222,7 +932,7 @@ namespace CaseRunner
             File.Create(Path.Combine(modulePath, "__init__.py")).Close(); //Create and don't forget to close!
             using (var writer = File.CreateText(Path.Combine(modulePath, "mod.py")))
             {
-                writer.Write(PythonCode.Replace("{class}", className));
+                writer.Write(testCase.PythonCode);
             }
 
             return null;

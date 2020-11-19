@@ -1,22 +1,20 @@
 using System;
 using System.Reflection;
-using System.Runtime.Serialization;
-using System.Runtime.Serialization.Formatters.Binary;
-using System.IO;
 
 namespace Python.Runtime
 {
+    using MaybeFieldInfo = MaybeMemberInfo<FieldInfo>;
     /// <summary>
     /// Implements a Python descriptor type that provides access to CLR fields.
     /// </summary>
     [Serializable]
     internal class FieldObject : ExtensionType
     {
-        private MaybeSerialize<FieldInfo> m_info;
+        private MaybeFieldInfo info;
 
         public FieldObject(FieldInfo info)
         {
-            m_info = new MaybeSerialize<FieldInfo>(info);
+            this.info = info;
         }
 
         /// <summary>
@@ -27,25 +25,19 @@ namespace Python.Runtime
         public static IntPtr tp_descr_get(IntPtr ds, IntPtr ob, IntPtr tp)
         {
             var self = (FieldObject)GetManagedObject(ds);
+            object result;
 
             if (self == null)
             {
                 return IntPtr.Zero;
             }
-            try
+            else if (!self.info.Valid)
             {
-                return self.tp_descr_get(ob, tp);
-            }
-            catch (Exception e)
-            {
-                Exceptions.SetError(Exceptions.TypeError, e.Message);
+                Exceptions.SetError(Exceptions.AttributeError, self.info.DeletedMessage);
                 return IntPtr.Zero;
             }
-        }
 
-        IntPtr tp_descr_get(IntPtr ob, IntPtr tp)
-        {
-            FieldInfo info = m_info.Value;
+            FieldInfo info = self.info.Value;
 
             if (ob == IntPtr.Zero || ob == Runtime.PyNone)
             {
@@ -57,7 +49,7 @@ namespace Python.Runtime
                 }
                 try
                 {
-                    var result = info.GetValue(null);
+                    result = info.GetValue(null);
                     return Converter.ToPython(result, info.FieldType);
                 }
                 catch (Exception e)
@@ -75,7 +67,7 @@ namespace Python.Runtime
                     Exceptions.SetError(Exceptions.TypeError, "instance is not a clr object");
                     return IntPtr.Zero;
                 }
-                var result = info.GetValue(co.inst);
+                result = info.GetValue(co.inst);
                 return Converter.ToPython(result, info.FieldType);
             }
             catch (Exception e)
@@ -93,9 +85,15 @@ namespace Python.Runtime
         public new static int tp_descr_set(IntPtr ds, IntPtr ob, IntPtr val)
         {
             var self = (FieldObject)GetManagedObject(ds);
+            object newval;
 
             if (self == null)
             {
+                return -1;
+            }
+            else if (!self.info.Valid)
+            {
+                Exceptions.SetError(Exceptions.AttributeError, self.info.DeletedMessage);
                 return -1;
             }
 
@@ -104,21 +102,8 @@ namespace Python.Runtime
                 Exceptions.SetError(Exceptions.TypeError, "cannot delete field");
                 return -1;
             }
-            try
-            {
-                return self.tp_descr_set(ob, val);
-            }
-            catch (Exception e)
-            {
-                Exceptions.SetError(Exceptions.TypeError, e.Message);
-                return -1;
-            }
-        }
 
-
-        int tp_descr_set(IntPtr ob, IntPtr val)
-        {
-            FieldInfo info = m_info.Value;
+            FieldInfo info = self.info.Value;
 
             if (info.IsLiteral || info.IsInitOnly)
             {
@@ -137,7 +122,6 @@ namespace Python.Runtime
                 }
             }
 
-            object newval;
             if (!Converter.ToManaged(val, info.FieldType, out newval, true))
             {
                 return -1;
@@ -174,7 +158,7 @@ namespace Python.Runtime
         public static IntPtr tp_repr(IntPtr ob)
         {
             var self = (FieldObject)GetManagedObject(ob);
-            return Runtime.PyString_FromString($"<field '{self.m_info}'>");
+            return Runtime.PyString_FromString($"<field '{self.info}'>");
         }
     }
 }

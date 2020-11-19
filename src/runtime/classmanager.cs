@@ -18,7 +18,7 @@ namespace Python.Runtime
     /// </summary>
     internal class ClassManager
     {
-        private static Dictionary<Type, ClassBase> cache;
+        private static Dictionary<MaybeType, ClassBase> cache;
         private static readonly Type dtype;
 
         private ClassManager()
@@ -36,7 +36,7 @@ namespace Python.Runtime
 
         public static void Reset()
         {
-            cache = new Dictionary<Type, ClassBase>(128);
+            cache = new Dictionary<MaybeType, ClassBase>(128);
         }
 
         internal static void DisposePythonWrappersForClrTypes()
@@ -85,26 +85,53 @@ namespace Python.Runtime
             var contexts = storage.AddValue("contexts",
                 new Dictionary<IntPtr, InterDomainContext>());
             storage.AddValue("cache", cache);
-            foreach (var cls in cache.Values)
+            foreach (var cls in cache)
             {
+                if (!cls.Key.Valid)
+                {
+                    // Don't serialize an invalid class
+                    continue;
+                }
                 // This incref is for cache to hold the cls,
                 // thus no need for decreasing it at RestoreRuntimeData.
-                Runtime.XIncref(cls.pyHandle);
-                var context = contexts[cls.pyHandle] = new InterDomainContext();
-                cls.Save(context);
+                Runtime.XIncref(cls.Value.pyHandle);
+                var context = contexts[cls.Value.pyHandle] = new InterDomainContext();
+                cls.Value.Save(context);
+                // Remove all members added in InitBaseClass.
+                // this is done so that if domain reloads and a member of a
+                // reflected dotnet class is removed, it is removed from the
+                // Python object's dictionary tool; thus raising an AttributeError
+                // instead of a TypeError.
+                // Classes are re-initialized on in RestoreRuntimeData.
+                // Console.WriteLine($"processing class {cls.Key.Value}");
+                foreach (var member in cls.Value.dotNetMembers)
+                {
+                    // Console.WriteLine($"removing donet member {cls.Key.Value}::{member}");
+                    IntPtr dict = Marshal.ReadIntPtr(cls.Value.tpHandle, TypeOffset.tp_dict);
+                    Runtime.PyDict_DelItemString(dict, member);
+                }
             }
         }
 
         internal static Dictionary<ManagedType, InterDomainContext> RestoreRuntimeData(RuntimeDataStorage storage)
         {
-            cache = storage.GetValue<Dictionary<Type, ClassBase>>("cache");
+            var _cache = storage.GetValue<Dictionary<MaybeType, ClassBase>>("cache");
+            // cache = storage.GetValue<Dictionary<Type, ClassBase>>("cache");
             var contexts = storage.GetValue <Dictionary<IntPtr, InterDomainContext>>("contexts");
             var loadedObjs = new Dictionary<ManagedType, InterDomainContext>();
-            foreach (var cls in cache.Values)
+            foreach (var pair in _cache)
             {
-                var context = contexts[cls.pyHandle];
-                cls.Load(context);
-                loadedObjs.Add(cls, context);
+                if (!pair.Key.Valid)
+                {
+                    Runtime.XDecref(pair.Value.pyHandle);
+                    continue;
+                }
+                // re-init the class; pick-up possible new members after a domain reload.
+                InitClassBase(pair.Key.Value, pair.Value);
+                cache.Add(pair.Key, pair.Value);
+                var context = contexts[pair.Value.pyHandle];
+                pair.Value.Load(context);
+                loadedObjs.Add(pair.Value, context);
             }
             return loadedObjs;
         }
@@ -209,11 +236,16 @@ namespace Python.Runtime
             IntPtr dict = Marshal.ReadIntPtr(tp, TypeOffset.tp_dict);
 
 
+            if (impl.dotNetMembers == null)
+            {
+                impl.dotNetMembers = new List<string>();
+            }
             IDictionaryEnumerator iter = info.members.GetEnumerator();
             while (iter.MoveNext())
             {
                 var item = (ManagedType)iter.Value;
                 var name = (string)iter.Key;
+                impl.dotNetMembers.Add(name);
                 Runtime.PyDict_SetItemString(dict, name, item.pyHandle);
                 // Decref the item now that it's been used.
                 item.DecrRefCount();
@@ -241,7 +273,7 @@ namespace Python.Runtime
             // required that the ClassObject.ctors be changed to internal
             if (co != null)
             {
-                if (co.ctors.Length > 0)
+                if (co.ctors_len > 0)
                 {
                     // Implement Overloads on the class object
                     if (!CLRModule._SuppressOverloads)

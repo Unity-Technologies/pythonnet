@@ -6,127 +6,216 @@ using System.IO;
 
 namespace Python.Runtime
 {
-    /// <summary>
-    /// A MaybeSerialize&lt;T&gt; delays errors from serialization and
-    /// deserialization until the item is used.
-    ///
-    /// Python for .NET uses this in the C# reloading architecture.
-    /// If e.g. a class member was renamed when reloading, references to the
-    /// old field will be invalid, but the rest of the system will still work.
-    /// Code that tries to use the old field will receive an exception.
-    ///
-    /// Assumption: the item being wrapped by MaybeSerialize will never be null.
-    /// </summary>
     [Serializable]
-    internal struct MaybeSerialize<T> : ISerializable where T : class
+    internal struct MaybeType : ISerializable
     {
-        /// <summary>
-        /// The item being wrapped.
-        ///
-        /// If this is null, that means we failed to serialize or deserialize it.
-        /// </summary>
-        private T m_item;
+        public static implicit operator MaybeType (Type ob) => new MaybeType(ob);
 
-        /// <summary>
-        /// A string useful for debugging the error.
-        ///
-        /// This is null if m_item deserialized properly.
-        /// Otherwise, it will be derived off of m_item.ToString() when we
-        /// serialized.
-        /// </summary>
-        private string m_name;
-
-        /// <summary>
-        /// Store an item in such a way that it can be deserialized.
-        ///
-        /// It must not be null.
-        /// </summary>
-        public MaybeSerialize(T item)
+        string m_name;
+        Type m_type;
+        public string DeletedMessage
         {
-            if (item == null)
+            get
             {
-                throw new System.ArgumentNullException("Trying to store a null");
+                return $"The .NET Type {m_name} no longer exists";
             }
-            m_item = item;
-            m_name = null;
+        }
+        public Type Value
+        {
+            get
+            {
+                if (m_type == null)
+                {
+                    throw new SerializationException(DeletedMessage);
+                }
+                return m_type;
+            }
+        }
+        public override string ToString()
+        {
+            return (m_type != null ? m_type.ToString() : $"missing type: {m_name}") + Valid.ToString();
+        }
+        public string Name {get{return m_name;}}
+        public bool Valid => m_type != null;
+
+        public MaybeType(Type tp)
+        {
+            m_type = tp;
+            m_name = tp.AssemblyQualifiedName;
         }
 
-        /// <summary>
-        /// Get the underlying deserialized value, or throw an exception
-        /// if deserialiation failed.
-        /// </summary>
+        private MaybeType(SerializationInfo info, StreamingContext context)
+        {
+            m_name = (string)info.GetValue("n", typeof(string));
+            m_type = Type.GetType(m_name, throwOnError:false);
+        }
+
+        public void GetObjectData(SerializationInfo info, StreamingContext context)
+        {
+            info.AddValue("n", m_name);
+        }
+    }
+
+    [Serializable]
+    internal struct MaybeMethod<T> : ISerializable where T: MethodBase//, MethodInfo, ConstructorInfo
+    {
+
+        public static implicit operator MaybeMethod<T> (T ob) => new MaybeMethod<T>(ob);
+
+        string m_name;
+        MethodBase m_info;
+
+        // As seen in ClassManager.GetClassInfo
+        const BindingFlags k_flags = BindingFlags.Static |
+                        BindingFlags.Instance |
+                        BindingFlags.Public ;
         public T Value
         {
             get
             {
-                if (m_item == null)
+                if (m_info == null)
                 {
-                    throw new SerializationException($"The .NET object underlying {m_name} no longer exists");
+                    throw new SerializationException($"The .NET {typeof(T)} {m_name} no longer exists");
                 }
-                return m_item;
+                return (T)m_info;
             }
         }
-
-        /// <summary>
-        /// Get a printable name.
-        /// </summary>
-        public string ToString()
+        public T UnsafeValue { get { return (T)m_info; } }
+        
+        public override string ToString()
         {
-            if (m_item == null)
-            {
-                return $"(missing {m_name})";
-            }
-            else
-            {
-                return m_item.ToString();
-            }
+            return (m_info != null ? m_info.ToString() : $"missing method info: {m_name}");
+        }
+        public string Name {get{return m_name;}}
+        public bool Valid => m_info != null;
+
+        public MaybeMethod(T mi)
+        {
+            m_info = mi;
+            m_name = mi?.ToString();
         }
 
-        /// <summary>
-        /// Implements ISerializable
-        /// </summary>
-        public void GetObjectData(SerializationInfo info, StreamingContext context)
+        internal MaybeMethod(SerializationInfo info, StreamingContext context)
         {
-            if (m_item == null)
-            {
-                // Save the name; this failed to reload in a previous
-                // generation but we still need to remember what it was.
-                info.AddValue("n", m_name);
-            }
-            else
-            {
-                // Try to save the item. If it fails, too bad.
-                try
-                {
-                    info.AddValue("i", m_item);
-                }
-                catch(SerializationException _)
-                {
-                }
-
-                // Also save the name in case the item doesn't deserialize
-                info.AddValue("n", m_item.ToString());
-            }
-        }
-
-        /// <summary>
-        /// Implements ISerializable
-        /// </summary>
-        private MaybeSerialize(SerializationInfo info, StreamingContext context)
-        {
+            m_name = info.GetString("s");
+            m_info = null;
             try
             {
-                // Try to deserialize the item. It might fail, or it might
-                // have already failed so there just isn't an "i" to find.
-                m_item = (T)info.GetValue("i", typeof(T));
-                m_name = null;
+                // Retrive the reflected type of the method;
+                var tp = Type.GetType(info.GetString("t"));
+                // Get the method's parameters types
+                var field_name = info.GetString("f");
+                var param = (string[])info.GetValue("p", typeof(string[]));
+                Type[] types = new Type[param.Length];
+                for (int i = 0; i < param.Length; i++)
+                {
+                    types[i] = Type.GetType(param[i]);
+                }
+                // Try to get the method
+                m_info = tp.GetMethod(field_name, k_flags, binder:null, types:types, modifiers:null);
+                // Try again, may be a constructor
+                if (m_info == null && m_name.Contains(".ctor"))
+                {
+                    m_info = tp.GetConstructor(k_flags, binder:null, types:types, modifiers:null);
+                }
             }
-            catch (SerializationException _)
+            catch
             {
-                // Getting the item failed, so get the name.
-                m_item = null;
-                m_name = info.GetString("n");
+            }
+        }
+
+        public void GetObjectData(SerializationInfo info, StreamingContext context)
+        {
+            info.AddValue("s", m_name);
+            if (Valid)
+            {
+                info.AddValue("f", m_info.Name);
+                info.AddValue("t", m_info.ReflectedType.AssemblyQualifiedName);
+                var p = m_info.GetParameters();
+                string[] types = new string[p.Length];
+                for (int i = 0; i < p.Length; i++)
+                {
+                    types[i] = p[i].ParameterType.AssemblyQualifiedName;
+                }
+                info.AddValue("p", types, typeof(string[]));
             }
         }
     }
+
+     [Serializable]
+    internal struct MaybeMemberInfo<T> : ISerializable where T: MemberInfo
+    {
+        public static implicit operator MaybeMemberInfo<T> (T ob) => new MaybeMemberInfo<T>(ob);
+
+        string m_name;
+        MemberInfo m_info;
+        
+        // As seen in ClassManager.GetClassInfo
+        const BindingFlags k_flags = BindingFlags.Static |
+                        BindingFlags.Instance |
+                        BindingFlags.Public ;
+
+        public string DeletedMessage 
+        {
+            get
+            {
+                return $"The .NET {typeof(T)} {m_name} no longer exists";
+            }
+        }
+
+        public T Value
+        {
+            get
+            {
+                if (m_info == null)
+                {
+                    throw new SerializationException(DeletedMessage);
+                }
+                return (T)m_info;
+            }
+        }
+
+        public override string ToString()
+        {
+            return (m_info != null ? m_info.ToString() : $"missing type: {m_name}  ") + Valid.ToString();
+        }
+
+        public string Name {get{return m_name;}}
+        public bool Valid => m_info != null;
+
+        public MaybeMemberInfo(T fi)
+        {
+            m_info = fi;
+            m_name = m_info?.ToString();
+        }
+
+        internal MaybeMemberInfo(SerializationInfo info, StreamingContext context)
+        {
+            m_name = info.GetString("s");
+            m_info = null;
+            try
+            {
+                var tp = Type.GetType(info.GetString("t"));
+                if (tp != null)
+                {
+                    var field_name = info.GetString("f");
+                    m_info = tp.GetField(field_name, k_flags);
+                }
+            }
+            catch 
+            {
+            }
+        }
+
+        public void GetObjectData(SerializationInfo info, StreamingContext context)
+        {
+            info.AddValue("s", m_name);
+            if (Valid)
+            {
+                info.AddValue("f", m_info.Name);
+                info.AddValue("t", m_info.ReflectedType.AssemblyQualifiedName);
+            }
+        }
+    }
+
 }
