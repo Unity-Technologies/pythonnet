@@ -54,7 +54,7 @@ namespace Python.Runtime
             public IncorrectRefCountException(IntPtr ptr)
             {
                 PyPtr = ptr;
-                IntPtr pyname = Runtime.PyObject_Unicode(PyPtr);
+                IntPtr pyname = Runtime.PyObject_Str(PyPtr);
                 string name = Runtime.GetManagedString(pyname);
                 Runtime.XDecref(pyname);
                 _message = $"<{name}> may has a incorrect ref count";
@@ -160,7 +160,7 @@ namespace Python.Runtime
                 {
                     // Python requires finalizers to preserve exception:
                     // https://docs.python.org/3/extending/newtypes.html#finalization-and-de-allocation
-                    Runtime.PyErr_Restore(errType, errVal, traceback);
+                    Runtime.PyErr_Restore(errType.StealNullable(), errVal.StealNullable(), traceback.StealNullable());
                 }
             }
         }

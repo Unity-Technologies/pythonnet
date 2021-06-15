@@ -22,6 +22,7 @@ namespace Python.Runtime
         {
         }
 
+        internal PyDict(BorrowedReference reference) : base(reference) { }
 
         /// <summary>
         /// PyDict Constructor
@@ -33,7 +34,7 @@ namespace Python.Runtime
         {
             if (obj == IntPtr.Zero)
             {
-                throw new PythonException();
+                throw PythonException.ThrowLastAsClrException();
             }
         }
 
@@ -103,12 +104,12 @@ namespace Python.Runtime
         /// </remarks>
         public PyObject Keys()
         {
-            IntPtr items = Runtime.PyDict_Keys(obj);
-            if (items == IntPtr.Zero)
+            using var items = Runtime.PyDict_Keys(Reference);
+            if (items.IsNull())
             {
-                throw new PythonException();
+                throw PythonException.ThrowLastAsClrException();
             }
-            return new PyObject(items);
+            return items.MoveToPyObject();
         }
 
 
@@ -123,7 +124,7 @@ namespace Python.Runtime
             IntPtr items = Runtime.PyDict_Values(obj);
             if (items == IntPtr.Zero)
             {
-                throw new PythonException();
+                throw PythonException.ThrowLastAsClrException();
             }
             return new PyObject(items);
         }
@@ -137,12 +138,12 @@ namespace Python.Runtime
         /// </remarks>
         public PyObject Items()
         {
-            var items = Runtime.PyDict_Items(this.obj);
+            var items = Runtime.PyDict_Items(this.Reference);
             try
             {
                 if (items.IsNull())
                 {
-                    throw new PythonException();
+                    throw PythonException.ThrowLastAsClrException();
                 }
 
                 return items.MoveToPyObject();
@@ -165,7 +166,7 @@ namespace Python.Runtime
             IntPtr op = Runtime.PyDict_Copy(obj);
             if (op == IntPtr.Zero)
             {
-                throw new PythonException();
+                throw PythonException.ThrowLastAsClrException();
             }
             return new PyDict(op);
         }
@@ -179,10 +180,10 @@ namespace Python.Runtime
         /// </remarks>
         public void Update(PyObject other)
         {
-            int result = Runtime.PyDict_Update(obj, other.obj);
+            int result = Runtime.PyDict_Update(Reference, other.Reference);
             if (result < 0)
             {
-                throw new PythonException();
+                throw PythonException.ThrowLastAsClrException();
             }
         }
 

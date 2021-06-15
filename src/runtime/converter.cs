@@ -27,7 +27,6 @@ namespace Python.Runtime
         private static Type int16Type;
         private static Type int32Type;
         private static Type int64Type;
-        private static Type flagsType;
         private static Type boolType;
         private static Type typeType;
 
@@ -42,7 +41,6 @@ namespace Python.Runtime
             singleType = typeof(Single);
             doubleType = typeof(Double);
             decimalType = typeof(Decimal);
-            flagsType = typeof(FlagsAttribute);
             boolType = typeof(Boolean);
             typeType = typeof(Type);
         }
@@ -112,6 +110,9 @@ namespace Python.Runtime
             return ToPython(value, typeof(T));
         }
 
+        internal static NewReference ToPythonReference<T>(T value)
+            => NewReference.DangerousFromPointer(ToPython(value, typeof(T)));
+
         private static readonly Func<object, bool> IsTransparentProxy = GetIsTransparentProxy();
 
         private static bool Never(object _) => false;
@@ -148,7 +149,11 @@ namespace Python.Runtime
                 return result;
             }
 
-            if (Type.GetTypeCode(type) == TypeCode.Object && value.GetType() != typeof(object)) {
+            if (Type.GetTypeCode(type) == TypeCode.Object
+                && value.GetType() != typeof(object)
+                && value is not Type
+                || type.IsEnum
+            ) {
                 var encoded = PyObjectConversions.TryEncode(value, type);
                 if (encoded != null) {
                     result = encoded.Handle;
@@ -197,11 +202,26 @@ namespace Python.Runtime
                     return ClassDerivedObject.ToPython(pyderived);
             }
 
+            // ModuleObjects are created in a way that their wrapping them as
+            // a CLRObject fails, the ClassObject has no tpHandle. Return the
+            // pyHandle as is, do not convert.
+            if (value is ModuleObject modobj)
+            {
+                var handle = modobj.pyHandle;
+                Runtime.XIncref(handle);
+                return handle;
+            }
+
             // hmm - from Python, we almost never care what the declared
             // type is. we'd rather have the object bound to the actual
             // implementing class.
 
             type = value.GetType();
+
+            if (type.IsEnum)
+            {
+                return CLRObject.GetInstHandle(value, type);
+            }
 
             TypeCode tc = Type.GetTypeCode(type);
 
@@ -211,7 +231,7 @@ namespace Python.Runtime
                     return CLRObject.GetInstHandle(value, type);
 
                 case TypeCode.String:
-                    return Runtime.PyUnicode_FromString((string)value);
+                    return Runtime.PyString_FromString((string)value);
 
                 case TypeCode.Int32:
                     return Runtime.PyInt_FromInt32((int)value);
@@ -241,9 +261,9 @@ namespace Python.Runtime
                     // return Runtime.PyFloat_FromDouble((double)((float)value));
                     string ss = ((float)value).ToString(nfi);
                     IntPtr ps = Runtime.PyString_FromString(ss);
-                    IntPtr op = Runtime.PyFloat_FromString(ps, IntPtr.Zero);
+                    NewReference op = Runtime.PyFloat_FromString(new BorrowedReference(ps));;
                     Runtime.XDecref(ps);
-                    return op;
+                    return op.DangerousMoveToPointerOrNull();
 
                 case TypeCode.Double:
                     return Runtime.PyFloat_FromDouble((double)value);
@@ -303,6 +323,11 @@ namespace Python.Runtime
         /// Return a managed object for the given Python object, taking funny
         /// byref types into account.
         /// </summary>
+        /// <param name="value">A Python object</param>
+        /// <param name="type">The desired managed type</param>
+        /// <param name="result">Receives the managed object</param>
+        /// <param name="setError">If true, call <c>Exceptions.SetError</c> with the reason for failure.</param>
+        /// <returns>True on success</returns>
         internal static bool ToManaged(IntPtr value, Type type,
             out object result, bool setError)
         {
@@ -312,6 +337,18 @@ namespace Python.Runtime
             }
             return Converter.ToManagedValue(value, type, out result, setError);
         }
+        /// <summary>
+        /// Return a managed object for the given Python object, taking funny
+        /// byref types into account.
+        /// </summary>
+        /// <param name="value">A Python object</param>
+        /// <param name="type">The desired managed type</param>
+        /// <param name="result">Receives the managed object</param>
+        /// <param name="setError">If true, call <c>Exceptions.SetError</c> with the reason for failure.</param>
+        /// <returns>True on success</returns>
+        internal static bool ToManaged(BorrowedReference value, Type type,
+            out object result, bool setError)
+            => ToManaged(value.DangerousGetAddress(), type, out result, setError);
 
         internal static bool ToManagedValue(BorrowedReference value, Type obType,
             out object result, bool setError)
@@ -333,20 +370,23 @@ namespace Python.Runtime
 
             if (mt != null)
             {
-                if (mt is CLRObject)
+                if (mt is CLRObject co)
                 {
-                    object tmp = ((CLRObject)mt).inst;
+                    object tmp = co.inst;
                     if (obType.IsInstanceOfType(tmp))
                     {
                         result = tmp;
                         return true;
                     }
-                    Exceptions.SetError(Exceptions.TypeError, $"value cannot be converted to {obType}");
+                    if (setError)
+                    {
+                        string typeString = tmp is null ? "null" : tmp.GetType().ToString();
+                        Exceptions.SetError(Exceptions.TypeError, $"{typeString} value cannot be converted to {obType}");
+                    }
                     return false;
                 }
-                if (mt is ClassBase)
+                if (mt is ClassBase cb)
                 {
-                    var cb = (ClassBase)mt;
                     if (!cb.type.Valid)
                     {
                         Exceptions.SetError(Exceptions.TypeError, cb.type.DeletedMessage);
@@ -376,14 +416,18 @@ namespace Python.Runtime
                 obType = obType.GetGenericArguments()[0];
             }
 
+            if (obType.ContainsGenericParameters)
+            {
+                if (setError)
+                {
+                    Exceptions.SetError(Exceptions.TypeError, $"Cannot create an instance of the open generic type {obType}");
+                }
+                return false;
+            }
+
             if (obType.IsArray)
             {
                 return ToArray(value, obType, out result, setError);
-            }
-
-            if (obType.IsEnum)
-            {
-                return ToEnum(value, obType, out result, setError);
             }
 
             // Conversion to 'Object' is done based on some reasonable default
@@ -480,7 +524,7 @@ namespace Python.Runtime
             }
 
             TypeCode typeCode = Type.GetTypeCode(obType);
-            if (typeCode == TypeCode.Object)
+            if (typeCode == TypeCode.Object || obType.IsEnum)
             {
                 IntPtr pyType = Runtime.PyObject_TYPE(value);
                 if (PyObjectConversions.TryDecode(value, pyType, obType, out result))
@@ -494,13 +538,32 @@ namespace Python.Runtime
 
         internal delegate bool TryConvertFromPythonDelegate(IntPtr pyObj, out object result);
 
+        internal static int ToInt32(BorrowedReference value)
+        {
+            nint num = Runtime.PyLong_AsSignedSize_t(value);
+            if (num == -1 && Exceptions.ErrorOccurred())
+            {
+                throw PythonException.ThrowLastAsClrException();
+            }
+            return checked((int)num);
+        }
+
         /// <summary>
         /// Convert a Python value to an instance of a primitive managed type.
         /// </summary>
         private static bool ToPrimitive(IntPtr value, Type obType, out object result, bool setError)
         {
-            TypeCode tc = Type.GetTypeCode(obType);
             result = null;
+            if (obType.IsEnum)
+            {
+                if (setError)
+                {
+                    Exceptions.SetError(Exceptions.TypeError, "since Python.NET 3.0 int can not be converted to Enum implicitly. Use Enum(int_value)");
+                }
+                return false;
+            }
+
+            TypeCode tc = Type.GetTypeCode(obType);
             IntPtr op = IntPtr.Zero;
 
             switch (tc)
@@ -517,7 +580,7 @@ namespace Python.Runtime
                 case TypeCode.Int32:
                     {
                         // Python3 always use PyLong API
-                        long num = Runtime.PyLong_AsLongLong(value);
+                        nint num = Runtime.PyLong_AsSignedSize_t(value);
                         if (num == -1 && Exceptions.ErrorOccurred())
                         {
                             goto convert_error;
@@ -540,14 +603,14 @@ namespace Python.Runtime
                         {
                             if (Runtime.PyBytes_Size(value) == 1)
                             {
-                                op = Runtime.PyBytes_AS_STRING(value);
+                                op = Runtime.PyBytes_AsString(value);
                                 result = (byte)Marshal.ReadByte(op);
                                 return true;
                             }
                             goto type_error;
                         }
 
-                        int num = Runtime.PyLong_AsLong(value);
+                        nint num = Runtime.PyLong_AsSignedSize_t(value);
                         if (num == -1 && Exceptions.ErrorOccurred())
                         {
                             goto convert_error;
@@ -566,14 +629,14 @@ namespace Python.Runtime
                         {
                             if (Runtime.PyBytes_Size(value) == 1)
                             {
-                                op = Runtime.PyBytes_AS_STRING(value);
+                                op = Runtime.PyBytes_AsString(value);
                                 result = (byte)Marshal.ReadByte(op);
                                 return true;
                             }
                             goto type_error;
                         }
 
-                        int num = Runtime.PyLong_AsLong(value);
+                        nint num = Runtime.PyLong_AsSignedSize_t(value);
                         if (num == -1 && Exceptions.ErrorOccurred())
                         {
                             goto convert_error;
@@ -592,7 +655,7 @@ namespace Python.Runtime
                         {
                             if (Runtime.PyBytes_Size(value) == 1)
                             {
-                                op = Runtime.PyBytes_AS_STRING(value);
+                                op = Runtime.PyBytes_AsString(value);
                                 result = (byte)Marshal.ReadByte(op);
                                 return true;
                             }
@@ -610,7 +673,7 @@ namespace Python.Runtime
                             }
                             goto type_error;
                         }
-                        int num = Runtime.PyLong_AsLong(value);
+                        nint num = Runtime.PyLong_AsSignedSize_t(value);
                         if (num == -1 && Exceptions.ErrorOccurred())
                         {
                             goto convert_error;
@@ -625,7 +688,7 @@ namespace Python.Runtime
 
                 case TypeCode.Int16:
                     {
-                        int num = Runtime.PyLong_AsLong(value);
+                        nint num = Runtime.PyLong_AsSignedSize_t(value);
                         if (num == -1 && Exceptions.ErrorOccurred())
                         {
                             goto convert_error;
@@ -640,18 +703,35 @@ namespace Python.Runtime
 
                 case TypeCode.Int64:
                     {
-                        long num = (long)Runtime.PyLong_AsLongLong(value);
-                        if (num == -1 && Exceptions.ErrorOccurred())
+                        if (Runtime.Is32Bit)
                         {
-                            goto convert_error;
+                            if (!Runtime.PyLong_Check(value))
+                            {
+                                goto type_error;
+                            }
+                            long num = Runtime.PyExplicitlyConvertToInt64(value);
+                            if (num == -1 && Exceptions.ErrorOccurred())
+                            {
+                                goto convert_error;
+                            }
+                            result = num;
+                            return true;
                         }
-                        result = num;
-                        return true;
+                        else
+                        {
+                            nint num = Runtime.PyLong_AsSignedSize_t(value);
+                            if (num == -1 && Exceptions.ErrorOccurred())
+                            {
+                                goto convert_error;
+                            }
+                            result = (long)num;
+                            return true;
+                        }
                     }
 
                 case TypeCode.UInt16:
                     {
-                        long num = Runtime.PyLong_AsLong(value);
+                        nint num = Runtime.PyLong_AsSignedSize_t(value);
                         if (num == -1 && Exceptions.ErrorOccurred())
                         {
                             goto convert_error;
@@ -666,61 +746,25 @@ namespace Python.Runtime
 
                 case TypeCode.UInt32:
                     {
-                        op = value;
-                        if (Runtime.PyObject_TYPE(value) != Runtime.PyLongType)
+                        nuint num = Runtime.PyLong_AsUnsignedSize_t(value);
+                        if (num == unchecked((nuint)(-1)) && Exceptions.ErrorOccurred())
                         {
-                            op = Runtime.PyNumber_Long(value);
-                            if (op == IntPtr.Zero)
-                            {
-                                goto convert_error;
-                            }
+                            goto convert_error;
                         }
-                        if (Runtime.Is32Bit || Runtime.IsWindows)
+                        if (num > UInt32.MaxValue)
                         {
-                            uint num = Runtime.PyLong_AsUnsignedLong32(op);
-                            if (num == uint.MaxValue && Exceptions.ErrorOccurred())
-                            {
-                                goto convert_error;
-                            }
-                            result = num;
+                            goto overflow;
                         }
-                        else
-                        {
-                            ulong num = Runtime.PyLong_AsUnsignedLong64(op);
-                            if (num == ulong.MaxValue && Exceptions.ErrorOccurred())
-                            {
-                                goto convert_error;
-                            }
-                            try
-                            {
-                                result = Convert.ToUInt32(num);
-                            }
-                            catch (OverflowException)
-                            {
-                                // Probably wasn't an overflow in python but was in C# (e.g. if cpython
-                                // longs are 64 bit then 0xFFFFFFFF + 1 will not overflow in
-                                // PyLong_AsUnsignedLong)
-                                goto overflow;
-                            }
-                        }
+                        result = (uint)num;
                         return true;
                     }
 
                 case TypeCode.UInt64:
                     {
-                        op = value;
-                        if (Runtime.PyObject_TYPE(value) != Runtime.PyLongType)
-                        {
-                            op = Runtime.PyNumber_Long(value);
-                            if (op == IntPtr.Zero)
-                            {
-                                goto convert_error;
-                            }
-                        }
-                        ulong num = Runtime.PyLong_AsUnsignedLongLong(op);
+                        ulong num = Runtime.PyLong_AsUnsignedLongLong(value);
                         if (num == ulong.MaxValue && Exceptions.ErrorOccurred())
                         {
-                            goto overflow;
+                            goto convert_error;
                         }
                         result = num;
                         return true;
@@ -793,10 +837,15 @@ namespace Python.Runtime
 
         private static void SetConversionError(IntPtr value, Type target)
         {
+            // PyObject_Repr might clear the error
+            Runtime.PyErr_Fetch(out var causeType, out var causeVal, out var causeTrace);
+
             IntPtr ob = Runtime.PyObject_Repr(value);
             string src = Runtime.GetManagedString(ob);
             Runtime.XDecref(ob);
-            Exceptions.SetError(Exceptions.TypeError, $"Cannot convert {src} to {target}");
+
+            Runtime.PyErr_Restore(causeType.StealNullable(), causeVal.StealNullable(), causeTrace.StealNullable());
+            Exceptions.RaiseTypeError($"Cannot convert {src} to {target}");
         }
 
 
@@ -810,34 +859,61 @@ namespace Python.Runtime
             Type elementType = obType.GetElementType();
             result = null;
 
-            bool IsSeqObj = Runtime.PySequence_Check(value);
-            var len = IsSeqObj ? Runtime.PySequence_Size(value) : -1;
-
             IntPtr IterObject = Runtime.PyObject_GetIter(value);
-
-            if(IterObject==IntPtr.Zero) {
+            if (IterObject == IntPtr.Zero)
+            {
                 if (setError)
                 {
+                    SetConversionError(value, obType);
+                }
+                else
+                {
+                    // PyObject_GetIter will have set an error
+                    Exceptions.Clear();
+                }
+                return false;
+            }
+
+            IList list;
+            try
+            {
+                // MakeGenericType can throw because elementType may not be a valid generic argument even though elementType[] is a valid array type.
+                // For example, if elementType is a pointer type.
+                // See https://docs.microsoft.com/en-us/dotnet/api/system.type.makegenerictype#System_Type_MakeGenericType_System_Type
+                var constructedListType = typeof(List<>).MakeGenericType(elementType);
+                bool IsSeqObj = Runtime.PySequence_Check(value);
+                if (IsSeqObj)
+                {
+                    var len = Runtime.PySequence_Size(value);
+                    list = (IList)Activator.CreateInstance(constructedListType, new Object[] { (int)len });
+                }
+                else
+                {
+                    // CreateInstance can throw even if MakeGenericType succeeded.
+                    // See https://docs.microsoft.com/en-us/dotnet/api/system.activator.createinstance#System_Activator_CreateInstance_System_Type_
+                    list = (IList)Activator.CreateInstance(constructedListType);
+                }
+            }
+            catch (Exception e)
+            {
+                if (setError)
+                {
+                    Exceptions.SetError(e);
                     SetConversionError(value, obType);
                 }
                 return false;
             }
 
-            Array items;
-
-            var listType = typeof(List<>);
-            var constructedListType = listType.MakeGenericType(elementType);
-            IList list = IsSeqObj ? (IList) Activator.CreateInstance(constructedListType, new Object[] {(int) len}) :
-                                        (IList) Activator.CreateInstance(constructedListType);
             IntPtr item;
 
             while ((item = Runtime.PyIter_Next(IterObject)) != IntPtr.Zero)
             {
-                object obj = null;
+                object obj;
 
-                if (!Converter.ToManaged(item, elementType, out obj, true))
+                if (!Converter.ToManaged(item, elementType, out obj, setError))
                 {
                     Runtime.XDecref(item);
+                    Runtime.XDecref(IterObject);
                     return false;
                 }
 
@@ -846,45 +922,17 @@ namespace Python.Runtime
             }
             Runtime.XDecref(IterObject);
 
-            items = Array.CreateInstance(elementType, list.Count);
+            if (Exceptions.ErrorOccurred())
+            {
+                if (!setError) Exceptions.Clear();
+                return false;
+            }
+
+            Array items = Array.CreateInstance(elementType, list.Count);
             list.CopyTo(items, 0);
 
             result = items;
             return true;
-        }
-
-
-        /// <summary>
-        /// Convert a Python value to a correctly typed managed enum instance.
-        /// </summary>
-        private static bool ToEnum(IntPtr value, Type obType, out object result, bool setError)
-        {
-            Type etype = Enum.GetUnderlyingType(obType);
-            result = null;
-
-            if (!ToPrimitive(value, etype, out result, setError))
-            {
-                return false;
-            }
-
-            if (Enum.IsDefined(obType, result))
-            {
-                result = Enum.ToObject(obType, result);
-                return true;
-            }
-
-            if (obType.GetCustomAttributes(flagsType, true).Length > 0)
-            {
-                result = Enum.ToObject(obType, result);
-                return true;
-            }
-
-            if (setError)
-            {
-                Exceptions.SetError(Exceptions.ValueError, "invalid enumeration value");
-            }
-
-            return false;
         }
     }
 

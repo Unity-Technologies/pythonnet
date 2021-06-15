@@ -117,7 +117,7 @@ namespace Python.Runtime
                 // Python object's dictionary tool; thus raising an AttributeError
                 // instead of a TypeError.
                 // Classes are re-initialized on in RestoreRuntimeData.
-                IntPtr dict = Marshal.ReadIntPtr(cls.Value.tpHandle, TypeOffset.tp_dict);
+                using var dict = Runtime.PyObject_GenericGetDict(cls.Value.TypeReference);
                 foreach (var member in cls.Value.dotNetMembers)
                 {
                     // No need to decref the member, the ClassBase instance does 
@@ -131,11 +131,11 @@ namespace Python.Runtime
                     }
                     else if (Exceptions.ErrorOccurred())
                     {
-                        throw new PythonException();
+                        throw PythonException.ThrowLastAsClrException();
                     }
                 }
                 // We modified the Type object, notify it we did.
-                Runtime.PyType_Modified(cls.Value.tpHandle);
+                Runtime.PyType_Modified(cls.Value.TypeReference);
             }
         }
 
@@ -155,7 +155,7 @@ namespace Python.Runtime
                 // re-init the class
                 InitClassBase(pair.Key.Value, pair.Value);
                 // We modified the Type object, notify it we did.
-                Runtime.PyType_Modified(pair.Value.tpHandle);
+                Runtime.PyType_Modified(pair.Value.TypeReference);
                 var context = contexts[pair.Value.pyHandle];
                 pair.Value.Load(context);
                 loadedObjs.Add(pair.Value, context);
@@ -266,10 +266,10 @@ namespace Python.Runtime
             // point to the managed methods providing the implementation.
 
 
-            IntPtr tp = TypeManager.GetTypeHandle(impl, type);
+            var pyType = TypeManager.GetType(impl, type);
 
             // Finally, initialize the class __dict__ and return the object.
-            IntPtr dict = Marshal.ReadIntPtr(tp, TypeOffset.tp_dict);
+            using var dict = Runtime.PyObject_GenericGetDict(pyType.Reference);
 
 
             if (impl.dotNetMembers == null)
@@ -282,7 +282,7 @@ namespace Python.Runtime
                 var item = (ManagedType)iter.Value;
                 var name = (string)iter.Key;
                 impl.dotNetMembers.Add(name);
-                Runtime.PyDict_SetItemString(dict, name, item.pyHandle);
+                Runtime.PyDict_SetItemString(dict, name, item.ObjectReference);
                 // Decref the item now that it's been used.
                 item.DecrRefCount();
                 if (ClassBase.CilToPyOpMap.TryGetValue(name, out var pyOp)) {
@@ -291,20 +291,15 @@ namespace Python.Runtime
             }
 
             // If class has constructors, generate an __doc__ attribute.
-            IntPtr doc = IntPtr.Zero;
+            NewReference doc = default;
             Type marker = typeof(DocStringAttribute);
             var attrs = (Attribute[])type.GetCustomAttributes(marker, false);
-            if (attrs.Length == 0)
-            {
-                doc = IntPtr.Zero;
-            }
-            else
+            if (attrs.Length != 0)
             {
                 var attr = (DocStringAttribute)attrs[0];
                 string docStr = attr.DocString;
-                doc = Runtime.PyString_FromString(docStr);
+                doc = NewReference.DangerousFromPointer(Runtime.PyString_FromString(docStr));
                 Runtime.PyDict_SetItem(dict, PyIdentifier.__doc__, doc);
-                Runtime.XDecref(doc);
             }
 
             var co = impl as ClassObject;
@@ -317,26 +312,27 @@ namespace Python.Runtime
                     // Implement Overloads on the class object
                     if (!CLRModule._SuppressOverloads)
                     {
-                        var ctors = new ConstructorBinding(type, tp, co.binder);
+                        var ctors = new ConstructorBinding(type, pyType, co.binder);
                         // ExtensionType types are untracked, so don't Incref() them.
                         // TODO: deprecate __overloads__ soon...
-                        Runtime.PyDict_SetItem(dict, PyIdentifier.__overloads__, ctors.pyHandle);
-                        Runtime.PyDict_SetItem(dict, PyIdentifier.Overloads, ctors.pyHandle);
+                        Runtime.PyDict_SetItem(dict, PyIdentifier.__overloads__, ctors.ObjectReference);
+                        Runtime.PyDict_SetItem(dict, PyIdentifier.Overloads, ctors.ObjectReference);
                         ctors.DecrRefCount();
                     }
 
                     // don't generate the docstring if one was already set from a DocStringAttribute.
-                    if (!CLRModule._SuppressDocs && doc == IntPtr.Zero)
+                    if (!CLRModule._SuppressDocs && doc.IsNull())
                     {
                         doc = co.GetDocString();
                         Runtime.PyDict_SetItem(dict, PyIdentifier.__doc__, doc);
-                        Runtime.XDecref(doc);
                     }
                 }
             }
+            doc.Dispose();
+
             // The type has been modified after PyType_Ready has been called
             // Refresh the type
-            Runtime.PyType_Modified(tp);
+            Runtime.PyType_Modified(pyType.Reference);
         }
 
         internal static bool ShouldBindMethod(MethodBase mb)
@@ -405,6 +401,17 @@ namespace Python.Runtime
                 {
                     local[m.Name] = 1;
                 }
+            }
+
+            // only [Flags] enums support bitwise operations
+            if (type.IsEnum && type.IsFlagsEnum())
+            {
+                var opsImpl = typeof(EnumOps<>).MakeGenericType(type);
+                foreach (var op in opsImpl.GetMethods(OpsHelper.BindingFlags))
+                {
+                    local[op.Name] = 1;
+                }
+                info = info.Concat(opsImpl.GetMethods(OpsHelper.BindingFlags)).ToArray();
             }
 
             // Now again to filter w/o losing overloaded member info

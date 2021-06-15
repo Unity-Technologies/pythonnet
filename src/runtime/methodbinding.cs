@@ -31,7 +31,7 @@ namespace Python.Runtime
             {
                 Runtime.XIncref(targetType);
             }
-            
+
             this.targetType = targetType;
 
             this.info = null;
@@ -40,12 +40,6 @@ namespace Python.Runtime
 
         public MethodBinding(MethodObject m, IntPtr target) : this(m, target, IntPtr.Zero)
         {
-        }
-
-        private void ClearMembers()
-        {
-            Runtime.Py_CLEAR(ref target);
-            Runtime.Py_CLEAR(ref targetType);
         }
 
         /// <summary>
@@ -201,35 +195,27 @@ namespace Python.Runtime
         /// <summary>
         /// MethodBinding  __hash__ implementation.
         /// </summary>
-        public static IntPtr tp_hash(IntPtr ob)
+        public static nint tp_hash(IntPtr ob)
         {
             var self = (MethodBinding)GetManagedObject(ob);
-            long x = 0;
-            long y = 0;
+            nint x = 0;
 
             if (self.target != IntPtr.Zero)
             {
-                x = Runtime.PyObject_Hash(self.target).ToInt64();
+                x = Runtime.PyObject_Hash(self.target);
                 if (x == -1)
                 {
-                    return new IntPtr(-1);
+                    return x;
                 }
             }
 
-            y = Runtime.PyObject_Hash(self.m.pyHandle).ToInt64();
+            nint y = Runtime.PyObject_Hash(self.m.pyHandle);
             if (y == -1)
             {
-                return new IntPtr(-1);
+                return y;
             }
 
-            x ^= y;
-
-            if (x == -1)
-            {
-                x = -1;
-            }
-
-            return new IntPtr(x);
+            return x ^ y;
         }
 
         /// <summary>
@@ -243,21 +229,11 @@ namespace Python.Runtime
             return Runtime.PyString_FromString($"<{type} method '{name}'>");
         }
 
-        /// <summary>
-        /// MethodBinding dealloc implementation.
-        /// </summary>
-        public new static void tp_dealloc(IntPtr ob)
+        protected override void Clear()
         {
-            var self = (MethodBinding)GetManagedObject(ob);
-            self.ClearMembers();
-            self.Dealloc();
-        }
-
-        public static int tp_clear(IntPtr ob)
-        {
-            var self = (MethodBinding)GetManagedObject(ob);
-            self.ClearMembers();
-            return 0;
+            Runtime.Py_CLEAR(ref this.target);
+            Runtime.Py_CLEAR(ref this.targetType);
+            base.Clear();
         }
 
         protected override void OnSave(InterDomainContext context)

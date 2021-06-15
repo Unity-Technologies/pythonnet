@@ -158,9 +158,10 @@ namespace Python.EmbeddingTest
             catch (PythonException e)
             {
                 string msg = e.ToString();
+                bool isImportError = e.Is(Exceptions.ImportError);
                 Runtime.Runtime.Shutdown();
 
-                if (e.IsMatches(Exceptions.ImportError))
+                if (isImportError)
                 {
                     Assert.Ignore("no atexit module");
                 }
@@ -175,7 +176,8 @@ namespace Python.EmbeddingTest
             {
                 called = true;
             };
-            atexit.InvokeMethod("register", callback.ToPython());
+            atexit.InvokeMethod("register", callback.ToPython()).Dispose();
+            atexit.Dispose();
             Runtime.Runtime.Shutdown();
             Assert.True(called);
         }

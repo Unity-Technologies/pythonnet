@@ -31,7 +31,7 @@ namespace Python.Runtime
         /// <summary>
         /// Helper to get docstring from reflected constructor info.
         /// </summary>
-        internal IntPtr GetDocString()
+        internal NewReference GetDocString()
         {
             MethodBase[] methods = binder.GetMethods();
             var str = "";
@@ -43,15 +43,16 @@ namespace Python.Runtime
                 }
                 str += t.ToString();
             }
-            return Runtime.PyString_FromString(str);
+            return NewReference.DangerousFromPointer(Runtime.PyString_FromString(str));
         }
 
 
         /// <summary>
         /// Implements __new__ for reflected classes and value types.
         /// </summary>
-        public static IntPtr tp_new(IntPtr tp, IntPtr args, IntPtr kw)
+        public static IntPtr tp_new(IntPtr tpRaw, IntPtr args, IntPtr kw)
         {
+            var tp = new BorrowedReference(tpRaw);
             var self = GetManagedObject(tp) as ClassObject;
 
             // Sanity check: this ensures a graceful error if someone does
@@ -87,7 +88,7 @@ namespace Python.Runtime
                     return IntPtr.Zero;
                 }
 
-                return CLRObject.GetInstHandle(result, tp);
+                return CLRObject.GetInstHandle(result, tp).DangerousMoveToPointerOrNull();
             }
 
             if (type.IsAbstract)
@@ -98,8 +99,7 @@ namespace Python.Runtime
 
             if (type.IsEnum)
             {
-                Exceptions.SetError(Exceptions.TypeError, "cannot instantiate enumeration");
-                return IntPtr.Zero;
+                return NewEnum(type, new BorrowedReference(args), tp).DangerousMoveToPointerOrNull();
             }
 
             object obj = self.binder.InvokeRaw(IntPtr.Zero, args, kw);
@@ -108,7 +108,44 @@ namespace Python.Runtime
                 return IntPtr.Zero;
             }
 
-            return CLRObject.GetInstHandle(obj, tp);
+            return CLRObject.GetInstHandle(obj, tp).DangerousMoveToPointerOrNull();
+        }
+
+        private static NewReference NewEnum(Type type, BorrowedReference args, BorrowedReference tp)
+        {
+            nint argCount = Runtime.PyTuple_Size(args);
+            bool allowUnchecked = false;
+            if (argCount == 2)
+            {
+                var allow = Runtime.PyTuple_GetItem(args, 1);
+                if (!Converter.ToManaged(allow, typeof(bool), out var allowObj, true) || allowObj is null)
+                {
+                    Exceptions.RaiseTypeError("second argument to enum constructor must be a boolean");
+                    return default;
+                }
+                allowUnchecked |= (bool)allowObj;
+            }
+
+            if (argCount < 1 || argCount > 2)
+            {
+                Exceptions.SetError(Exceptions.TypeError, "no constructors match given arguments");
+                return default;
+            }
+
+            var op = Runtime.PyTuple_GetItem(args, 0);
+            if (!Converter.ToManaged(op, type.GetEnumUnderlyingType(), out object result, true))
+            {
+                return default;
+            }
+
+            if (!allowUnchecked && !Enum.IsDefined(type, result) && !type.IsFlagsEnum())
+            {
+                Exceptions.SetError(Exceptions.ValueError, "Invalid enumeration value. Pass True as the second argument if unchecked conversion is desired");
+                return default;
+            }
+
+            object enumValue = Enum.ToObject(type, result);
+            return CLRObject.GetInstHandle(enumValue, tp);
         }
 
 

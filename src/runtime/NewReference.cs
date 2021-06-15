@@ -2,6 +2,7 @@ namespace Python.Runtime
 {
     using System;
     using System.Diagnostics.Contracts;
+    using System.Runtime.CompilerServices;
 
     /// <summary>
     /// Represents a reference to a Python object, that is tracked by Python's reference counting.
@@ -10,6 +11,16 @@ namespace Python.Runtime
     ref struct NewReference
     {
         IntPtr pointer;
+
+        /// <summary>Creates a <see cref="NewReference"/> pointing to the same object</summary>
+        public NewReference(BorrowedReference reference, bool canBeNull = false)
+        {
+            var address = canBeNull
+                ? reference.DangerousGetAddressOrNull()
+                : reference.DangerousGetAddress();
+            Runtime.XIncref(address);
+            this.pointer = address;
+        }
 
         [Pure]
         public static implicit operator BorrowedReference(in NewReference reference)
@@ -29,6 +40,16 @@ namespace Python.Runtime
         }
 
         /// <summary>Moves ownership of this instance to unmanged pointer</summary>
+        public IntPtr DangerousMoveToPointer()
+        {
+            if (this.IsNull()) throw new NullReferenceException();
+
+            var result = this.pointer;
+            this.pointer = IntPtr.Zero;
+            return result;
+        }
+
+        /// <summary>Moves ownership of this instance to unmanged pointer</summary>
         public IntPtr DangerousMoveToPointerOrNull()
         {
             var result = this.pointer;
@@ -36,6 +57,34 @@ namespace Python.Runtime
             return result;
         }
 
+        /// <summary>
+        /// Returns <see cref="PyObject"/> wrapper around this reference, which now owns
+        /// the pointer. Sets the original reference to <c>null</c>, as it no longer owns it.
+        /// </summary>
+        public PyObject MoveToPyObjectOrNull() => this.IsNull() ? null : this.MoveToPyObject();
+        /// <summary>
+        /// Call this method to move ownership of this reference to a Python C API function,
+        /// that steals reference passed to it.
+        /// </summary>
+        [MethodImpl(MethodImplOptions.AggressiveInlining)]
+        public StolenReference StealNullable()
+        {
+            IntPtr rawPointer = this.pointer;
+            this.pointer = IntPtr.Zero;
+            return new StolenReference(rawPointer);
+        }
+
+        /// <summary>
+        /// Call this method to move ownership of this reference to a Python C API function,
+        /// that steals reference passed to it.
+        /// </summary>
+        [MethodImpl(MethodImplOptions.AggressiveInlining)]
+        public StolenReference Steal()
+        {
+            if (this.IsNull()) throw new NullReferenceException();
+
+            return this.StealNullable();
+        }
         /// <summary>
         /// Removes this reference to a Python object, and sets it to <c>null</c>.
         /// </summary>

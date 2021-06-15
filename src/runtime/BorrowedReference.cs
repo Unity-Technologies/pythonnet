@@ -10,10 +10,13 @@ namespace Python.Runtime
         readonly IntPtr pointer;
         public bool IsNull => this.pointer == IntPtr.Zero;
 
-
         /// <summary>Gets a raw pointer to the Python object</summary>
         public IntPtr DangerousGetAddress()
             => this.IsNull ? throw new NullReferenceException() : this.pointer;
+        /// <summary>Gets a raw pointer to the Python object</summary>
+        public IntPtr DangerousGetAddressOrNull() => this.pointer;
+
+        public static BorrowedReference Null => new BorrowedReference();
 
         /// <summary>
         /// Creates new instance of <see cref="BorrowedReference"/> from raw pointer. Unsafe.
@@ -27,6 +30,14 @@ namespace Python.Runtime
             => a.pointer == b.pointer;
         public static bool operator !=(BorrowedReference a, BorrowedReference b)
             => a.pointer != b.pointer;
+        public static bool operator ==(BorrowedReference reference, NullOnly @null)
+            => reference.IsNull;
+        public static bool operator !=(BorrowedReference reference, NullOnly @null)
+            => !reference.IsNull;
+        public static bool operator ==(NullOnly @null, BorrowedReference reference)
+            => reference.IsNull;
+        public static bool operator !=(NullOnly @null, BorrowedReference reference)
+            => !reference.IsNull;
 
         public override bool Equals(object obj) {
             if (obj is IntPtr ptr)

@@ -6,13 +6,13 @@ jobs:
   build-test:
     name: Build and Test
     runs-on: ${{ matrix.os }}-latest
-    timeout-minutes: 5
+    timeout-minutes: 7
 
     strategy:
       fail-fast: false
       matrix:
         os: [windows, ubuntu, macos]
-        python: [3.6, 3.7, 3.8, 3.9]
+        python: ["3.6", "3.7", "3.8", "3.9"]
         platform: [x64]
         shutdown_mode: [Normal, Soft]
 
@@ -44,19 +44,34 @@ jobs:
 
       - name: Build and Install
         run: |
-          python setup.py configure
           pip install -v .
 
-      - name: Python Tests
-        run: pytest
+      - name: Set Python DLL path (non Windows)
+        if: ${{ matrix.os != 'windows' }}
+        run: |
+          python -m pythonnet.find_libpython --export >> $GITHUB_ENV
+
+      - name: Set Python DLL path (Windows)
+        if: ${{ matrix.os == 'windows' }}
+        run: |
+          python -m pythonnet.find_libpython --export | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
 
       - name: Embedding tests
         run: dotnet test --runtime any-${{ matrix.platform }} src/embed_tests/
-        if: ${{ matrix.os != 'macos' }} # Not working right now, doesn't find libpython
+
+      - name: Python Tests (Mono)
+        if: ${{ matrix.os != 'windows' }}
+        run: pytest --runtime mono
+
+      - name: Python Tests (.NET Core)
+        run: pytest --runtime netcore
+
+      - name: Python Tests (.NET Framework)
+        if: ${{ matrix.os == 'windows' }}
+        run: pytest --runtime netfx
 
       - name: Python tests run from .NET
         run: dotnet test --runtime any-${{ matrix.platform }} src/python_tests_runner/
-        if: ${{ matrix.os == 'windows' }} # Not working for others right now
 
       # TODO: Run perf tests
       # TODO: Run mono tests on Windows?
